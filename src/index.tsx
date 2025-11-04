@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
 /**
  * Alastizen Universal Time (AUT) — Live Clock ✨
@@ -55,6 +55,64 @@ type EquiluxAUT = AUTBase & {
 };
 
 type AUTResult = NormalAUT | EquiluxAUT;
+
+type PlaceStatus = "idle" | "loading" | "ready" | "error";
+
+const FALLBACK_PLACE_LABEL = "Charlotte, NC";
+const PLACE_CACHE_PREFIX = "aut-place:";
+const COORD_PRECISION = 3;
+
+function roundedCoord(value: number, precision = COORD_PRECISION): number {
+  const factor = 10 ** precision;
+  return Math.round(value * factor) / factor;
+}
+
+function coordsCacheKey(coords: Coordinates): string {
+  const lat = roundedCoord(coords.lat);
+  const lon = roundedCoord(coords.lon);
+  return `${lat.toFixed(COORD_PRECISION)},${lon.toFixed(COORD_PRECISION)}`;
+}
+
+function readSession(key: string): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.sessionStorage.getItem(key) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSession(key: string, value: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(key, value);
+  } catch {
+    // ignore
+  }
+}
+
+function extractPlaceName(response: any): string | undefined {
+  if (!response || typeof response !== "object") return undefined;
+  const locality = typeof response.city === "string" && response.city.trim().length > 0
+    ? response.city.trim()
+    : typeof response.locality === "string" && response.locality.trim().length > 0
+    ? response.locality.trim()
+    : undefined;
+  const region =
+    typeof response.principalSubdivision === "string" && response.principalSubdivision.trim().length > 0
+      ? response.principalSubdivision.trim()
+      : undefined;
+  const country =
+    typeof response.countryName === "string" && response.countryName.trim().length > 0
+      ? response.countryName.trim()
+      : undefined;
+
+  const parts: string[] = [];
+  if (locality) parts.push(locality);
+  if (region && !parts.includes(region)) parts.push(region);
+  if (country && !parts.includes(country)) parts.push(country);
+  return parts.length > 0 ? parts.join(", ") : undefined;
+}
 
 // --- Math helpers ---
 const DEG = Math.PI / 180;
@@ -343,6 +401,88 @@ function useGeolocation(defaultCoords: Coordinates) {
   return { coords, status, setCoords };
 }
 
+function useReverseGeocode(
+  coords: Coordinates,
+  geoStatus: GeolocationStatus,
+  fallbackLabel: string
+) {
+  const cacheRef = useRef<Map<string, string>>(new Map());
+  const abortRef = useRef<AbortController | null>(null);
+  const [placeLabel, setPlaceLabel] = useState<string>(fallbackLabel);
+  const [placeStatus, setPlaceStatus] = useState<PlaceStatus>("idle");
+
+  const lookup = useCallback(
+    (force = false) => {
+      if (geoStatus !== "granted") {
+        abortRef.current?.abort();
+        const label = geoStatus === "pending" ? fallbackLabel : `${fallbackLabel}`;
+        setPlaceLabel(label);
+        setPlaceStatus(geoStatus === "pending" ? "idle" : "ready");
+        return;
+      }
+
+      if (!Number.isFinite(coords.lat) || !Number.isFinite(coords.lon)) {
+        setPlaceLabel("Current location");
+        setPlaceStatus("error");
+        return;
+      }
+
+      const key = coordsCacheKey(coords);
+      if (!force) {
+        const cached =
+          cacheRef.current.get(key) ??
+          readSession(PLACE_CACHE_PREFIX + key);
+        if (cached) {
+          cacheRef.current.set(key, cached);
+          setPlaceLabel(cached);
+          setPlaceStatus("ready");
+          return;
+        }
+      }
+
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      setPlaceStatus("loading");
+
+      const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${coords.lat}&longitude=${coords.lon}&localityLanguage=en`;
+      fetch(url, { signal: controller.signal })
+        .then((res) => {
+          if (!res.ok) {
+            throw new Error("reverse geocode failed");
+          }
+          return res.json();
+        })
+        .then((data) => {
+          if (controller.signal.aborted) return;
+          const resolved = extractPlaceName(data) ?? "Current location";
+          cacheRef.current.set(key, resolved);
+          writeSession(PLACE_CACHE_PREFIX + key, resolved);
+          setPlaceLabel(resolved);
+          setPlaceStatus("ready");
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return;
+          setPlaceLabel("Current location");
+          setPlaceStatus("error");
+        });
+    },
+    [coords, geoStatus, fallbackLabel]
+  );
+
+  useEffect(() => {
+    lookup();
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [lookup]);
+
+  const retry = useCallback(() => lookup(true), [lookup]);
+
+  return { placeLabel, placeStatus, retry };
+}
+
 // Alice font loader + PWA (manifest + SW) registration
 function useAliceAndPWA() {
   useEffect(() => {
@@ -421,6 +561,7 @@ export default function AUTClock() {
   // Charlotte NoDa fallback
   const fallback = useMemo<Coordinates>(() => ({ lat: 35.25, lon: -80.8 }), []);
   const { coords, status, setCoords } = useGeolocation(fallback);
+  const { placeLabel, placeStatus, retry } = useReverseGeocode(coords, status, FALLBACK_PLACE_LABEL);
   const [now, setNow] = useState(new Date());
 
   useEffect(() => {
@@ -437,6 +578,36 @@ export default function AUTClock() {
   const fmt = (d: Date) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const fmtLong = (d: Date) =>
     d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  const locationPrimary = (() => {
+    if (status === "pending") return "Requesting location…";
+    if (status === "granted") {
+      if (placeStatus === "loading") return "Locating your place…";
+      return placeLabel;
+    }
+    if (status === "denied" || status === "unavailable") {
+      return `${FALLBACK_PLACE_LABEL} (fallback)`;
+    }
+    return FALLBACK_PLACE_LABEL;
+  })();
+
+  const locationHint = (() => {
+    if (status === "granted") {
+      if (placeStatus === "loading") return "Fetching location name…";
+      if (placeStatus === "error") return "Could not resolve a friendly place name.";
+      return null;
+    }
+    if (status === "denied") {
+      return "Permission denied — using fallback coordinates.";
+    }
+    if (status === "unavailable") {
+      return "Geolocation unavailable — using fallback coordinates.";
+    }
+    return null;
+  })();
+
+  const locationHintTone =
+    status === "granted" && placeStatus === "error" ? "text-amber-300" : "text-zinc-400";
 
   // Use a stable, wrapped AUT hour value
   const autH = ((Number(data.autHours) % 24) + 24) % 24;
@@ -484,27 +655,14 @@ export default function AUTClock() {
         </header>
 
         {/* Location Controls */}
-        <section className="grid md:grid-cols-3 gap-4">
-          <div className="md:col-span-2">
-            <div className="text-sm text-zinc-400">Location</div>
-            <div className="text-lg font-medium">
-              {status === "granted" ? (
-                <span>Using your current position</span>
-              ) : status === "denied" ? (
-                <span>Charlotte, NC (fallback)</span>
-              ) : status === "pending" ? (
-                <span>Requesting location…</span>
-              ) : (
-                <span>Charlotte, NC (fallback)</span>
-              )}
+        <section className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div className="text-sm text-zinc-400">Location</div>
+              <div className="text-lg font-medium">{locationPrimary}</div>
             </div>
-            <div className="text-zinc-400 text-sm">
-              lat {coords.lat.toFixed(4)}°, lon {coords.lon.toFixed(4)}°
-            </div>
-          </div>
-          <div className="flex items-end">
             <button
-              className="px-3 py-2 rounded-xl bg-zinc-700 hover:bg-zinc-600 transition shadow"
+              className="self-start rounded-xl bg-zinc-700 px-3 py-2 shadow transition hover:bg-zinc-600 md:self-center"
               onClick={() => {
                 if (navigator.geolocation) {
                   navigator.geolocation.getCurrentPosition(
@@ -522,6 +680,22 @@ export default function AUTClock() {
               Recenter
             </button>
           </div>
+          <div className="text-sm text-zinc-400">
+            lat {coords.lat.toFixed(4)}°, lon {coords.lon.toFixed(4)}°
+          </div>
+          {locationHint ? (
+            <div className={`flex items-center gap-2 text-xs ${locationHintTone}`}>
+              <span>{locationHint}</span>
+              {status === "granted" && placeStatus === "error" ? (
+                <button
+                  className="rounded-lg px-2 py-1 text-xs text-emerald-300 transition hover:text-emerald-200"
+                  onClick={() => retry()}
+                >
+                  Try again
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </section>
 
         {/* AUT Display */}
