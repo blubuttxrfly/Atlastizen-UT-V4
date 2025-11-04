@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { PRESENT_ONLY } from "./config/rays";
 import { ZIP_LOOKUP_ENDPOINT, ZIP_LOOKUP_USER_AGENT } from "./config/geocode";
+import { LunaRuntime } from "./lib/lunaRuntime";
 
 /**
  * Alastizen Universal Time (AUT) — Live Clock ✨
@@ -68,6 +69,8 @@ type TimeZoneInfo = {
   offsetMinutes?: number;
 };
 
+type CompassStatus = "idle" | "active" | "denied" | "unsupported";
+
 const FALLBACK_PLACE_LABEL = "Charlotte, NC";
 const PLACE_CACHE_PREFIX = "aut-place:";
 const COORD_PRECISION = 3;
@@ -75,6 +78,7 @@ const RING_OUTER_RADIUS = 62;
 const RING_INNER_RADIUS = 22;
 const POINTER_RADIUS = 58;
 const LABEL_RADIUS = (RING_OUTER_RADIUS + RING_INNER_RADIUS) / 2;
+const COMPASS_CARDINALS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const;
 
 function roundedCoord(value: number, precision = COORD_PRECISION): number {
   const factor = 10 ** precision;
@@ -153,6 +157,16 @@ function describeWedge(
     `A ${innerRadius} ${innerRadius} 0 ${largeArcFlag} 0 ${innerStart.x.toFixed(3)} ${innerStart.y.toFixed(3)}`,
     "Z",
   ].join(" ");
+}
+
+function normalizeDegrees(value: number): number {
+  return ((value % 360) + 360) % 360;
+}
+
+function headingToLabel(degrees: number): string {
+  const normalized = normalizeDegrees(degrees);
+  const index = Math.round(normalized / 45) % COMPASS_CARDINALS.length;
+  return COMPASS_CARDINALS[index];
 }
 
 function formatOffset(minutes: number): string {
@@ -649,10 +663,21 @@ export default function AUTClock() {
   const [timeZoneError, setTimeZoneError] = useState<string | null>(null);
   const timeZoneControllerRef = useRef<AbortController | null>(null);
   const [now, setNow] = useState(new Date());
+  const [compassStatus, setCompassStatus] = useState<CompassStatus>("idle");
+  const [compassHeading, setCompassHeading] = useState<number | null>(null);
+  const [compassPitch, setCompassPitch] = useState<number | null>(null);
+  const [compassRoll, setCompassRoll] = useState<number | null>(null);
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!("DeviceOrientationEvent" in window)) {
+      setCompassStatus("unsupported");
+    }
   }, []);
 
   useEffect(() => {
@@ -665,6 +690,33 @@ export default function AUTClock() {
     return () => {
       timeZoneControllerRef.current?.abort();
     };
+  }, []);
+
+  const requestCompass = useCallback(async () => {
+    if (typeof window === "undefined") return;
+    if (!("DeviceOrientationEvent" in window)) {
+      setCompassStatus("unsupported");
+      return;
+    }
+    const deviceOrientationEvent = window.DeviceOrientationEvent as typeof DeviceOrientationEvent & {
+      requestPermission?: () => Promise<PermissionState | "granted" | "denied" | "prompt">;
+    };
+    if (
+      deviceOrientationEvent &&
+      typeof deviceOrientationEvent.requestPermission === "function"
+    ) {
+      try {
+        const permission = await deviceOrientationEvent.requestPermission();
+        if (permission !== "granted") {
+          setCompassStatus("denied");
+          return;
+        }
+      } catch {
+        setCompassStatus("denied");
+        return;
+      }
+    }
+    setCompassStatus("active");
   }, []);
 
   useEffect(() => {
@@ -729,10 +781,109 @@ export default function AUTClock() {
       });
   }, [coords.lat, coords.lon]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (compassStatus !== "active") return;
+
+    const handler = (event: DeviceOrientationEvent) => {
+      if (typeof event.alpha === "number") {
+        setCompassHeading(normalizeDegrees(event.alpha));
+      }
+      if (typeof event.beta === "number") {
+        setCompassPitch(event.beta);
+      }
+      if (typeof event.gamma === "number") {
+        setCompassRoll(event.gamma);
+      }
+    };
+
+    window.addEventListener("deviceorientation", handler, true);
+    return () => window.removeEventListener("deviceorientation", handler, true);
+  }, [compassStatus]);
+
   const data = useMemo<AUTResult>(
     () => computeAUT(now, coords.lat, coords.lon),
     [now, coords]
   );
+  const luna = useMemo(() => {
+    try {
+      return LunaRuntime.now(coords.lat, coords.lon, now);
+    } catch {
+      return null;
+    }
+  }, [coords.lat, coords.lon, now]);
+  const moonArc = useMemo(() => {
+    if (!luna || luna.tonight.length < 2) return null;
+    const width = 360;
+    const height = 200;
+    const leftPadding = 28;
+    const rightPadding = 28;
+    const topPadding = 18;
+    const bottomPadding = 28;
+    const chartWidth = width - leftPadding - rightPadding;
+    const chartHeight = height - topPadding - bottomPadding;
+    const minAlt = -10;
+    const maxAlt = 90;
+    const clampAltitude = (alt: number) => Math.max(minAlt, Math.min(maxAlt, alt));
+    const sample = (entry: (typeof luna.tonight)[number]) => {
+      const azRad = (entry.az * Math.PI) / 180;
+      const xNorm = (1 - Math.sin(azRad)) / 2; // East left, West right
+      const cappedAlt = clampAltitude(entry.alt);
+      const altNorm = (cappedAlt - minAlt) / (maxAlt - minAlt);
+      const x = leftPadding + xNorm * chartWidth;
+      const y = topPadding + (1 - altNorm) * chartHeight;
+      return { ...entry, x, y, cappedAlt };
+    };
+    const points = luna.tonight.map(sample);
+    const horizonAltNorm = (0 - minAlt) / (maxAlt - minAlt);
+    const horizonY = topPadding + (1 - horizonAltNorm) * chartHeight;
+    const path = points
+      .map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`)
+      .join(" ");
+    const areaPoints = points.map((point) => ({
+      x: point.x,
+      y: Math.min(point.y, horizonY),
+    }));
+    const areaPath =
+      areaPoints.length >= 2
+        ? [
+            `M${areaPoints[0].x.toFixed(1)},${horizonY.toFixed(1)}`,
+            ...areaPoints.map((point) => `L${point.x.toFixed(1)},${point.y.toFixed(1)}`),
+            `L${areaPoints[areaPoints.length - 1].x.toFixed(1)},${horizonY.toFixed(1)}`,
+            "Z",
+          ].join(" ")
+        : null;
+    const sixtyAltNorm = (60 - minAlt) / (maxAlt - minAlt);
+    const thirtyAltNorm = (30 - minAlt) / (maxAlt - minAlt);
+    const bands = [
+      { label: "60°", y: topPadding + (1 - sixtyAltNorm) * chartHeight },
+      { label: "30°", y: topPadding + (1 - thirtyAltNorm) * chartHeight },
+    ];
+    const nowMs = now.getTime();
+    const current = points.reduce<{ diff: number; point: typeof points[number] | null }>(
+      (best, point) => {
+        const diff = Math.abs(point.ts.getTime() - nowMs);
+        return diff < best.diff ? { diff, point } : best;
+      },
+      { diff: Number.POSITIVE_INFINITY, point: null }
+    ).point;
+    return {
+      width,
+      height,
+      leftPadding,
+      rightPadding,
+      topPadding,
+      bottomPadding,
+      chartWidth,
+      chartHeight,
+      path,
+      areaPath,
+      horizonY,
+      bands,
+      points,
+      current,
+    };
+  }, [luna, now]);
   const pct = Math.max(0, Math.min(100, Math.round(data.progress * 100)));
 
   const locationTimeZoneId = timeZoneInfo?.timeZone;
@@ -765,6 +916,65 @@ export default function AUTClock() {
         }),
     };
   }, [locationTimeZoneId]);
+  const formatMoonTime = (date?: Date) => (date ? formatShortTime(date) : "—");
+  const moonDeclStr = luna ? `${luna.decDeg >= 0 ? "+" : ""}${luna.decDeg.toFixed(2)}°` : "—";
+  const moonAltStr = luna ? `${luna.altDeg >= 0 ? "+" : ""}${luna.altDeg.toFixed(1)}°` : "—";
+  const moonAzStr = luna ? `${luna.azDeg.toFixed(1)}°` : "—";
+  const moonIllumPct = luna ? Math.round(luna.illum * 100) : null;
+  const moonPhaseName = luna?.phaseName ?? "—";
+  const solsticeLinked = !!luna && Math.abs(luna.decDeg) >= 23.44;
+  const moonRiseLocal = formatMoonTime(luna?.rise);
+  const moonTransitLocal = formatMoonTime(luna?.transit);
+  const moonSetLocal = formatMoonTime(luna?.set);
+  const moonRiseAut = luna?.rise ? computeAUT(luna.rise, coords.lat, coords.lon).autClock : "—";
+  const moonTransitAut = luna?.transit
+    ? computeAUT(luna.transit, coords.lat, coords.lon).autClock
+    : "—";
+  const moonSetAut = luna?.set ? computeAUT(luna.set, coords.lat, coords.lon).autClock : "—";
+  const moonTransitAltStr =
+    typeof luna?.transitAltDeg === "number" ? `${luna.transitAltDeg.toFixed(1)}°` : "—";
+  const moonArcStart = luna && luna.tonight.length > 0 ? luna.tonight[0]?.ts : undefined;
+  const moonArcEnd =
+    luna && luna.tonight.length > 0 ? luna.tonight[luna.tonight.length - 1]?.ts : undefined;
+  const moonArcStartLabel = formatMoonTime(moonArcStart);
+  const moonArcEndLabel = formatMoonTime(moonArcEnd);
+  const moonArcColor = luna
+    ? luna.decDeg >= 0
+      ? "rgba(56,189,248,0.85)"
+      : "rgba(244,114,182,0.85)"
+    : "rgba(148,163,184,0.75)";
+  const moonArcFillColor = luna
+    ? luna.decDeg >= 0
+      ? "rgba(56,189,248,0.18)"
+      : "rgba(244,114,182,0.18)"
+    : "rgba(148,163,184,0.12)";
+  const moonLegendPathColor = moonArcColor;
+  const moonLegendHorizonColor = "rgba(248,250,252,0.45)";
+  const moonLegendBandColor = "rgba(148,163,184,0.28)";
+  const moonLegendIconColor = "#f8fafc";
+  const compassHeadingDeg = compassHeading !== null ? normalizeDegrees(compassHeading) : null;
+  const compassHeadingLabel = compassHeadingDeg !== null ? headingToLabel(compassHeadingDeg) : null;
+  const compassHeadingDisplay =
+    compassHeadingDeg !== null && compassHeadingLabel
+      ? `${Math.round(compassHeadingDeg)}° ${compassHeadingLabel}`
+      : "—";
+  const compassPitchDisplay = compassPitch !== null ? `${Math.round(compassPitch)}°` : "—";
+  const compassRollDisplay = compassRoll !== null ? `${Math.round(compassRoll)}°` : "—";
+  const compassPointerRotation = compassHeadingDeg ?? 0;
+  const compassTickAngles = useMemo(() => Array.from({ length: 36 }, (_, i) => i * 10), []);
+  const compassMajorAngles = useMemo(() => Array.from({ length: 4 }, (_, i) => i * 90), []);
+  const compassStatusHint = (() => {
+    switch (compassStatus) {
+      case "active":
+        return "Live device orientation";
+      case "denied":
+        return "Permission denied — enable sensor access in browser settings.";
+      case "unsupported":
+        return "Device orientation not supported in this browser.";
+      default:
+        return "Tap “Enable Gyro” to activate the compass.";
+    }
+  })();
 
   const locationPrimary = (() => {
     if (status === "pending") return "Requesting location…";
@@ -1084,6 +1294,301 @@ export default function AUTClock() {
             </div>
             <div className="rounded-xl bg-zinc-900/30 border border-zinc-700 p-4">
               <div>Night length: {Math.round(data.nightLenMin)} min</div>
+            </div>
+          </div>
+        </section>
+
+        {/* Luna Panel */}
+        <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-sm uppercase tracking-wide text-zinc-400">Luna (Moon)</div>
+              <div className="text-4xl font-bold tabular-nums">
+                δₘ <span className="text-emerald-200">{moonDeclStr}</span>
+              </div>
+              <div className="text-sm text-zinc-300">
+                Alt {moonAltStr} • Az {moonAzStr}
+              </div>
+            </div>
+            <div className="text-right space-y-1">
+              <div className="text-sm text-zinc-300">Illumination</div>
+              <div className="text-2xl font-semibold">
+                {moonIllumPct !== null ? `${moonIllumPct}%` : "—"}
+              </div>
+              <div className="text-xs uppercase tracking-wide text-zinc-400">
+                Phase <span className="text-zinc-200 normal-case">{moonPhaseName}</span>
+              </div>
+              {solsticeLinked ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-200">
+                  Solstice-Linked Arc
+                </span>
+              ) : (
+                <span className="text-xs text-zinc-400">|δₘ| &lt; 23.44°</span>
+              )}
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-xl border border-zinc-700 bg-zinc-900/40 p-4">
+              <div className="text-sm text-zinc-400">Moonrise</div>
+              <div className="text-2xl font-semibold">{moonRiseAut}</div>
+              <div className="text-xs text-zinc-400">Local {moonRiseLocal}</div>
+            </div>
+            <div className="rounded-xl border border-zinc-700 bg-zinc-900/40 p-4">
+              <div className="text-sm text-zinc-400">Transit</div>
+              <div className="text-2xl font-semibold">{moonTransitAut}</div>
+              <div className="text-xs text-zinc-400">Local {moonTransitLocal}</div>
+              <div className="text-xs text-zinc-400">Alt {moonTransitAltStr}</div>
+            </div>
+            <div className="rounded-xl border border-zinc-700 bg-zinc-900/40 p-4">
+              <div className="text-sm text-zinc-400">Moonset</div>
+              <div className="text-2xl font-semibold">{moonSetAut}</div>
+              <div className="text-xs text-zinc-400">Local {moonSetLocal}</div>
+            </div>
+          </div>
+
+          {moonArc ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs uppercase tracking-wide text-zinc-400">
+                Tonight Horizon Track
+                <span className="normal-case">
+                  {moonArcStartLabel} → {moonArcEndLabel}
+                </span>
+              </div>
+              <div className="relative mx-auto w-full max-w-xl">
+                <svg
+                  viewBox={`0 0 ${moonArc.width} ${moonArc.height}`}
+                  className="w-full drop-shadow-[0_10px_24px_rgba(11,15,30,0.35)]"
+                  role="presentation"
+                >
+                  <rect
+                    x="0"
+                    y="0"
+                    width={moonArc.width}
+                    height={moonArc.height}
+                    fill="rgba(12,17,31,0.25)"
+                    rx="14"
+                  />
+                  {moonArc.areaPath ? (
+                    <path d={moonArc.areaPath} fill={moonArcFillColor} stroke="none" />
+                  ) : null}
+                  {moonArc.bands.map((band) => (
+                    <line
+                      key={band.label}
+                      x1={moonArc.leftPadding}
+                      x2={moonArc.width - moonArc.rightPadding}
+                      y1={band.y}
+                      y2={band.y}
+                      stroke={moonLegendBandColor}
+                      strokeDasharray="6 6"
+                      strokeWidth="1"
+                    />
+                  ))}
+                  <line
+                    x1={moonArc.leftPadding}
+                    x2={moonArc.width - moonArc.rightPadding}
+                    y1={moonArc.horizonY}
+                    y2={moonArc.horizonY}
+                    stroke={moonLegendHorizonColor}
+                    strokeDasharray="4 4"
+                    strokeWidth="1.4"
+                  />
+                  <path
+                    d={moonArc.path}
+                    fill="none"
+                    stroke={moonArcColor}
+                    strokeWidth="2.6"
+                    strokeLinecap="round"
+                  />
+                  {moonArc.current ? (
+                    <g>
+                      <circle
+                        cx={moonArc.current.x}
+                        cy={moonArc.current.y}
+                        r={7}
+                        fill={moonLegendIconColor}
+                        stroke={moonArcColor}
+                        strokeWidth="1.5"
+                      />
+                      <path
+                        d={`
+                          M ${moonArc.current.x - 3.5} ${moonArc.current.y}
+                          q 3.5 -6 7 0
+                          q -3.5 6 -7 0
+                        `}
+                        fill={moonArcColor}
+                        fillOpacity={0.35}
+                      />
+                    </g>
+                  ) : null}
+                </svg>
+                <span className="pointer-events-none absolute left-0 bottom-6 -translate-x-1/2 text-[0.65rem] uppercase tracking-[0.2em] text-zinc-500">
+                  East
+                </span>
+                <span className="pointer-events-none absolute right-0 bottom-6 translate-x-1/2 text-[0.65rem] uppercase tracking-[0.2em] text-zinc-500">
+                  West
+                </span>
+                <span className="pointer-events-none absolute left-1/2 bottom-2 -translate-x-1/2 text-[0.65rem] uppercase tracking-[0.2em] text-zinc-500">
+                  South
+                </span>
+                <span className="pointer-events-none absolute left-1/2 top-2 -translate-x-1/2 text-[0.65rem] uppercase tracking-[0.2em] text-zinc-500">
+                  Up / Zenith
+                </span>
+              </div>
+              <div className="grid gap-2 text-xs text-zinc-400 sm:grid-cols-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-flex h-2 w-10 rounded-full"
+                    style={{ backgroundColor: moonLegendPathColor }}
+                    aria-hidden="true"
+                  />
+                  <span>Moon path (East → West)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-flex w-10 border-b border-dashed"
+                    style={{ borderBottomColor: moonLegendHorizonColor }}
+                    aria-hidden="true"
+                  />
+                  <span>Horizon (0° altitude)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-flex h-3 w-3 rounded-full"
+                    style={{ backgroundColor: moonLegendIconColor, boxShadow: `0 0 0 1px ${moonArcColor}` }}
+                    aria-hidden="true"
+                  />
+                  <span>Live Moon position</span>
+                </div>
+              </div>
+              <div className="text-xs text-zinc-500">
+                δₘ = Moon declination (°) — angular height of the Moon’s path relative to Earth’s equator.
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-zinc-700 p-6 text-center text-sm text-zinc-400">
+              Lunar track unavailable for this location/time.
+            </div>
+          )}
+        </section>
+
+        {/* Gyro Compass */}
+        <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div className="text-sm uppercase tracking-wide text-zinc-400">Gyro Compass</div>
+              <div className="text-4xl font-bold tabular-nums text-zinc-100">
+                {compassHeadingDisplay}
+              </div>
+              <div className="text-xs text-zinc-400">{compassStatusHint}</div>
+            </div>
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex items-center gap-3 text-sm text-zinc-300">
+                <span>Tilt β</span>
+                <span className="rounded-lg bg-zinc-800/70 px-2 py-1 font-medium text-zinc-100">
+                  {compassPitchDisplay}
+                </span>
+                <span>Roll γ</span>
+                <span className="rounded-lg bg-zinc-800/70 px-2 py-1 font-medium text-zinc-100">
+                  {compassRollDisplay}
+                </span>
+              </div>
+              <button
+                className="rounded-xl bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => requestCompass()}
+                disabled={compassStatus === "active" || compassStatus === "unsupported"}
+              >
+                {compassStatus === "active" ? "Compass Active" : "Enable Gyro"}
+              </button>
+            </div>
+          </div>
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex-1 rounded-2xl border border-zinc-700 bg-zinc-900/60 p-6 shadow-inner">
+              <div className="relative mx-auto w-full max-w-sm">
+                <svg viewBox="0 0 220 220" className="w-full">
+                  <defs>
+                    <radialGradient id="compass-face" cx="50%" cy="45%" r="60%">
+                      <stop offset="0%" stopColor="rgba(30,41,59,0.9)" />
+                      <stop offset="100%" stopColor="rgba(15,23,42,0.75)" />
+                    </radialGradient>
+                  </defs>
+                  <circle cx="110" cy="110" r="100" fill="url(#compass-face)" stroke="rgba(148,163,184,0.45)" strokeWidth="1.6" />
+                  {compassTickAngles.map((angle) => {
+                    const rad = (angle * Math.PI) / 180;
+                    const outerR = angle % 30 === 0 ? 100 : 98;
+                    const innerR = angle % 30 === 0 ? 84 : 90;
+                    const x1 = 110 + outerR * Math.sin(rad);
+                    const y1 = 110 - outerR * Math.cos(rad);
+                    const x2 = 110 + innerR * Math.sin(rad);
+                    const y2 = 110 - innerR * Math.cos(rad);
+                    return (
+                      <line
+                        key={`tick-${angle}`}
+                        x1={x1.toFixed(1)}
+                        y1={y1.toFixed(1)}
+                        x2={x2.toFixed(1)}
+                        y2={y2.toFixed(1)}
+                        stroke={angle % 30 === 0 ? "rgba(248,250,252,0.55)" : "rgba(148,163,184,0.35)"}
+                        strokeWidth={angle % 30 === 0 ? 1.6 : 1}
+                      />
+                    );
+                  })}
+                  {compassMajorAngles.map((angle) => {
+                    const rad = (angle * Math.PI) / 180;
+                    const x = 110 + 70 * Math.sin(rad);
+                    const y = 110 - 70 * Math.cos(rad);
+                    const label = headingToLabel(angle);
+                    const fontSize = label.length === 1 ? 12 : 10;
+                    return (
+                      <text
+                        key={`label-${angle}`}
+                        x={x.toFixed(1)}
+                        y={(y + 4).toFixed(1)}
+                        textAnchor="middle"
+                        fontSize={fontSize}
+                        fill={label === "N" ? "#f8fafc" : "#cbd5f5"}
+                        fontWeight={label === "N" ? 700 : 500}
+                      >
+                        {label}
+                      </text>
+                    );
+                  })}
+                  <g transform={`rotate(${compassPointerRotation}, 110, 110)`}>
+                    <polygon
+                      points="110,30 117,110 110,102 103,110"
+                      fill="#f97316"
+                      stroke="#fcd34d"
+                      strokeWidth="1.4"
+                    />
+                    <polygon
+                      points="110,190 117,120 110,126 103,120"
+                      fill="rgba(148,163,184,0.45)"
+                    />
+                  </g>
+                  <circle cx="110" cy="110" r="6" fill="#0f172a" stroke="#f8fafc" strokeWidth="1.2" />
+                </svg>
+              </div>
+            </div>
+            <div className="flex w-full max-w-xs flex-col gap-3 rounded-2xl border border-zinc-700 bg-zinc-900/50 p-5 text-sm text-zinc-200">
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Sensor status</span>
+                <span className="font-medium capitalize">{compassStatus}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Heading</span>
+                <span className="font-medium">{compassHeadingDisplay}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Tilt β</span>
+                <span className="font-medium">{compassPitchDisplay}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-400">Roll γ</span>
+                <span className="font-medium">{compassRollDisplay}</span>
+              </div>
+              <p className="text-xs text-zinc-500">
+                Heading uses the device gyro; accuracy improves when your device is level and away from magnetic interference.
+              </p>
             </div>
           </div>
         </section>
