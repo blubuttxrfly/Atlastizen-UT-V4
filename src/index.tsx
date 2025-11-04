@@ -502,7 +502,7 @@ export default function AUTClock() {
               lat {coords.lat.toFixed(4)}°, lon {coords.lon.toFixed(4)}°
             </div>
           </div>
-          <div className="flex items-end gap-2">
+          <div className="flex items-end">
             <button
               className="px-3 py-2 rounded-xl bg-zinc-700 hover:bg-zinc-600 transition shadow"
               onClick={() => {
@@ -520,12 +520,6 @@ export default function AUTClock() {
               }}
             >
               Recenter
-            </button>
-            <button
-              className="px-3 py-2 rounded-xl bg-zinc-700 hover:bg-zinc-600 transition shadow"
-              onClick={() => setCoords(fallback)}
-            >
-              Charlotte
             </button>
           </div>
         </section>
