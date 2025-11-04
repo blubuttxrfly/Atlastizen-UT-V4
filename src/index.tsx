@@ -667,6 +667,7 @@ export default function AUTClock() {
   const [compassHeading, setCompassHeading] = useState<number | null>(null);
   const [compassPitch, setCompassPitch] = useState<number | null>(null);
   const [compassRoll, setCompassRoll] = useState<number | null>(null);
+  const [compassAbsolute, setCompassAbsolute] = useState(false);
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
@@ -716,6 +717,7 @@ export default function AUTClock() {
         return;
       }
     }
+    setCompassAbsolute(false);
     setCompassStatus("active");
   }, []);
 
@@ -785,14 +787,27 @@ export default function AUTClock() {
     if (typeof window === "undefined") return;
     if (compassStatus !== "active") return;
 
-    const handler = (event: DeviceOrientationEvent) => {
-      if (typeof event.alpha === "number") {
-        setCompassHeading(normalizeDegrees(event.alpha));
+    const handler = (
+      event: DeviceOrientationEvent & {
+        webkitCompassHeading?: number;
+        webkitCompassAccuracy?: number;
       }
-      if (typeof event.beta === "number") {
+    ) => {
+      if (typeof event.webkitCompassHeading === "number" && !Number.isNaN(event.webkitCompassHeading)) {
+        setCompassHeading(normalizeDegrees(event.webkitCompassHeading));
+        setCompassAbsolute(true);
+      } else if (event.absolute && typeof event.alpha === "number" && !Number.isNaN(event.alpha)) {
+        setCompassHeading(normalizeDegrees(360 - event.alpha));
+        setCompassAbsolute(true);
+      } else if (typeof event.alpha === "number" && !Number.isNaN(event.alpha)) {
+        setCompassHeading(normalizeDegrees(360 - event.alpha));
+        setCompassAbsolute(false);
+      }
+
+      if (typeof event.beta === "number" && !Number.isNaN(event.beta)) {
         setCompassPitch(event.beta);
       }
-      if (typeof event.gamma === "number") {
+      if (typeof event.gamma === "number" && !Number.isNaN(event.gamma)) {
         setCompassRoll(event.gamma);
       }
     };
@@ -966,7 +981,9 @@ export default function AUTClock() {
   const compassStatusHint = (() => {
     switch (compassStatus) {
       case "active":
-        return "Live device orientation";
+        return compassAbsolute
+          ? "Live device orientation (true north locked)"
+          : "Move your device in a gentle figure-eight to calibrate true north.";
       case "denied":
         return "Permission denied — enable sensor access in browser settings.";
       case "unsupported":
