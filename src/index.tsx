@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { PRESENT_ONLY } from "./config/rays";
+import { ZIP_LOOKUP_ENDPOINT, ZIP_LOOKUP_USER_AGENT } from "./config/geocode";
 
 /**
  * Alastizen Universal Time (AUT) — Live Clock ✨
@@ -57,10 +59,22 @@ type EquiluxAUT = AUTBase & {
 type AUTResult = NormalAUT | EquiluxAUT;
 
 type PlaceStatus = "idle" | "loading" | "ready" | "error";
+type ZipStatus = "idle" | "loading" | "success" | "error";
+type TimeZoneStatus = "idle" | "loading" | "success" | "error";
+
+type TimeZoneInfo = {
+  timeZone: string;
+  abbreviation?: string;
+  offsetMinutes?: number;
+};
 
 const FALLBACK_PLACE_LABEL = "Charlotte, NC";
 const PLACE_CACHE_PREFIX = "aut-place:";
 const COORD_PRECISION = 3;
+const RING_OUTER_RADIUS = 62;
+const RING_INNER_RADIUS = 22;
+const POINTER_RADIUS = 58;
+const LABEL_RADIUS = (RING_OUTER_RADIUS + RING_INNER_RADIUS) / 2;
 
 function roundedCoord(value: number, precision = COORD_PRECISION): number {
   const factor = 10 ** precision;
@@ -112,6 +126,65 @@ function extractPlaceName(response: any): string | undefined {
   if (region && !parts.includes(region)) parts.push(region);
   if (country && !parts.includes(country)) parts.push(country);
   return parts.length > 0 ? parts.join(", ") : undefined;
+}
+
+function polarToCartesian(radius: number, angle: number): { x: number; y: number } {
+  return {
+    x: radius * Math.cos(angle),
+    y: radius * Math.sin(angle),
+  };
+}
+
+function describeWedge(
+  outerRadius: number,
+  innerRadius: number,
+  startAngle: number,
+  endAngle: number
+): string {
+  const outerStart = polarToCartesian(outerRadius, startAngle);
+  const outerEnd = polarToCartesian(outerRadius, endAngle);
+  const innerEnd = polarToCartesian(innerRadius, endAngle);
+  const innerStart = polarToCartesian(innerRadius, startAngle);
+  const largeArcFlag = endAngle - startAngle <= Math.PI ? "0" : "1";
+  return [
+    `M ${outerStart.x.toFixed(3)} ${outerStart.y.toFixed(3)}`,
+    `A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${outerEnd.x.toFixed(3)} ${outerEnd.y.toFixed(3)}`,
+    `L ${innerEnd.x.toFixed(3)} ${innerEnd.y.toFixed(3)}`,
+    `A ${innerRadius} ${innerRadius} 0 ${largeArcFlag} 0 ${innerStart.x.toFixed(3)} ${innerStart.y.toFixed(3)}`,
+    "Z",
+  ].join(" ");
+}
+
+function formatOffset(minutes: number): string {
+  const sign = minutes >= 0 ? "+" : "-";
+  const abs = Math.abs(Math.round(minutes));
+  const hours = Math.floor(abs / 60);
+  const mins = abs % 60;
+  return `${sign}${hours.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`;
+}
+
+function splitRayLabel(name: string): string[] {
+  if (name.includes("-")) {
+    const parts = name.split("-");
+    return parts.map((part, idx) =>
+      idx < parts.length - 1 ? `${part.trim()}-` : part.trim()
+    );
+  }
+  const tokens = name.split(" ");
+  const lines: string[] = [];
+  let current = "";
+  const maxLen = 10;
+  for (const token of tokens) {
+    const candidate = current ? `${current} ${token}` : token;
+    if (candidate.length > maxLen && current) {
+      lines.push(current);
+      current = token;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
 }
 
 // --- Math helpers ---
@@ -526,19 +599,24 @@ function useAliceAndPWA() {
 
 // Ray windows: 12 windows across 24 AUT hours (2h each)
 const RAY_WINDOWS = [
-  { name: "Red", start: 0, end: 2, tint: "bg-red-500" },
-  { name: "Orange", start: 2, end: 4, tint: "bg-orange-500" },
-  { name: "Yellow", start: 4, end: 6, tint: "bg-yellow-400" },
-  { name: "Green", start: 6, end: 8, tint: "bg-green-500" },
-  { name: "Teal", start: 8, end: 10, tint: "bg-teal-500" },
-  { name: "Blue", start: 10, end: 12, tint: "bg-blue-500" },
-  { name: "Indigo", start: 12, end: 14, tint: "bg-indigo-500" },
-  { name: "Violet", start: 14, end: 16, tint: "bg-violet-500" },
-  { name: "Magenta", start: 16, end: 18, tint: "bg-fuchsia-500" },
-  { name: "Omni", start: 18, end: 20, tint: "bg-zinc-50 text-zinc-900" },
-  { name: "Elemental", start: 20, end: 22, tint: "bg-emerald-600" },
-  { name: "Infinite of ALL", start: 22, end: 24, tint: "bg-sky-300 text-zinc-900" },
+  { name: "Red", start: 0, end: 2, color: "#ef4444" },
+  { name: "Orange", start: 2, end: 4, color: "#f97316" },
+  { name: "Yellow", start: 4, end: 6, color: "#facc15", labelColor: "#f8fafc" },
+  { name: "Green", start: 6, end: 8, color: "#22c55e" },
+  { name: "Teal", start: 8, end: 10, color: "#14b8a6" },
+  { name: "Blue", start: 10, end: 12, color: "#3b82f6" },
+  { name: "Indigo", start: 12, end: 14, color: "#6366f1" },
+  { name: "Violet", start: 14, end: 16, color: "#8b5cf6" },
+  { name: "Magenta", start: 16, end: 18, color: "#d946ef" },
+  { name: "Omni", start: 18, end: 20, color: "#fafafa", labelColor: "#f8fafc" },
+  { name: "Crystalline-Carbon", start: 20, end: 22, color: "#a5f3fc", labelColor: "#f8fafc" },
+  { name: "Infinite of ALL", start: 22, end: 24, color: "#7dd3fc", labelColor: "#f8fafc" },
 ];
+
+const TOP_RAY_INDEX = (() => {
+  const idx = RAY_WINDOWS.findIndex((r) => r.name === "Infinite of ALL");
+  return idx === -1 ? 0 : idx;
+})();
 
 // Helper: robust ray-index selection with modulo wrap & FP tolerance
 function rayIndexForAUT(hours: number): number {
@@ -562,6 +640,14 @@ export default function AUTClock() {
   const fallback = useMemo<Coordinates>(() => ({ lat: 35.25, lon: -80.8 }), []);
   const { coords, status, setCoords } = useGeolocation(fallback);
   const { placeLabel, placeStatus, retry } = useReverseGeocode(coords, status, FALLBACK_PLACE_LABEL);
+  const [zipInput, setZipInput] = useState("");
+  const [zipStatus, setZipStatus] = useState<ZipStatus>("idle");
+  const [zipError, setZipError] = useState<string | null>(null);
+  const zipControllerRef = useRef<AbortController | null>(null);
+  const [timeZoneInfo, setTimeZoneInfo] = useState<TimeZoneInfo | null>(null);
+  const [timeZoneStatus, setTimeZoneStatus] = useState<TimeZoneStatus>("idle");
+  const [timeZoneError, setTimeZoneError] = useState<string | null>(null);
+  const timeZoneControllerRef = useRef<AbortController | null>(null);
   const [now, setNow] = useState(new Date());
 
   useEffect(() => {
@@ -569,15 +655,116 @@ export default function AUTClock() {
     return () => clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      zipControllerRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      timeZoneControllerRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!Number.isFinite(coords.lat) || !Number.isFinite(coords.lon)) {
+      return;
+    }
+    timeZoneControllerRef.current?.abort();
+    const controller = new AbortController();
+    timeZoneControllerRef.current = controller;
+    setTimeZoneStatus("loading");
+    setTimeZoneError(null);
+
+    const url = `https://timeapi.io/api/Time/current/coordinate?latitude=${coords.lat}&longitude=${coords.lon}`;
+
+    fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+      },
+    })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Time lookup failed (${res.status})`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        const zone: string | undefined =
+          data?.timeZone ?? data?.timezone ?? data?.time_zone ?? data?.tz ?? undefined;
+        const abbreviation: string | undefined =
+          data?.timeZoneAbbreviation ?? data?.abbreviation ?? data?.dstName ?? undefined;
+
+        let offsetMinutes: number | undefined;
+        const localTime = data?.currentLocalTime ?? data?.dateTime ?? data?.localTime ?? null;
+        const utcTime = data?.utcTime ?? data?.utcDateTime ?? data?.currentUtcTime ?? null;
+        if (typeof localTime === "string" && typeof utcTime === "string") {
+          const localMs = Date.parse(localTime);
+          const utcMs = Date.parse(utcTime);
+          if (Number.isFinite(localMs) && Number.isFinite(utcMs)) {
+            offsetMinutes = Math.round((localMs - utcMs) / 60000);
+          }
+        } else if (typeof data?.timeZoneOffset === "number") {
+          offsetMinutes = data.timeZoneOffset;
+        } else if (typeof data?.utcOffset === "number") {
+          offsetMinutes = data.utcOffset;
+        }
+
+        if (!zone) {
+          throw new Error("Time zone unavailable for these coordinates.");
+        }
+
+        setTimeZoneInfo({ timeZone: zone, abbreviation, offsetMinutes });
+        setTimeZoneStatus("success");
+        setTimeZoneError(null);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        setTimeZoneStatus("error");
+        setTimeZoneError(err instanceof Error ? err.message : "Time zone lookup failed.");
+        setTimeZoneInfo(null);
+      });
+  }, [coords.lat, coords.lon]);
+
   const data = useMemo<AUTResult>(
     () => computeAUT(now, coords.lat, coords.lon),
     [now, coords]
   );
   const pct = Math.max(0, Math.min(100, Math.round(data.progress * 100)));
 
-  const fmt = (d: Date) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const fmtLong = (d: Date) =>
-    d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const locationTimeZoneId = timeZoneInfo?.timeZone;
+  const { formatShortTime, formatLongTime } = useMemo(() => {
+    if (locationTimeZoneId) {
+      const shortFmt = new Intl.DateTimeFormat(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: locationTimeZoneId,
+      });
+      const longFmt = new Intl.DateTimeFormat(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZone: locationTimeZoneId,
+      });
+      return {
+        formatShortTime: (date: Date) => shortFmt.format(date),
+        formatLongTime: (date: Date) => longFmt.format(date),
+      };
+    }
+    return {
+      formatShortTime: (date: Date) =>
+        date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      formatLongTime: (date: Date) =>
+        date.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        }),
+    };
+  }, [locationTimeZoneId]);
 
   const locationPrimary = (() => {
     if (status === "pending") return "Requesting location…";
@@ -590,6 +777,29 @@ export default function AUTClock() {
     }
     return FALLBACK_PLACE_LABEL;
   })();
+
+  const timeZoneLine = (() => {
+    if (timeZoneStatus === "loading") return "Resolving time zone…";
+    if (timeZoneStatus === "error") {
+      return timeZoneError ? `Time zone unavailable (${timeZoneError})` : "Time zone unavailable.";
+    }
+    if (timeZoneInfo?.timeZone) {
+      const abbr = timeZoneInfo.abbreviation ? ` (${timeZoneInfo.abbreviation})` : "";
+      const offset =
+        typeof timeZoneInfo.offsetMinutes === "number"
+          ? ` UTC${formatOffset(timeZoneInfo.offsetMinutes)}`
+          : "";
+      return `Time zone: ${timeZoneInfo.timeZone}${abbr}${offset}`;
+    }
+    return "Time zone: Device time";
+  })();
+
+  const timeZoneTone =
+    timeZoneStatus === "error"
+      ? "text-amber-300"
+      : timeZoneStatus === "loading"
+      ? "text-zinc-400"
+      : "text-zinc-400";
 
   const locationHint = (() => {
     if (status === "granted") {
@@ -612,25 +822,150 @@ export default function AUTClock() {
   // Use a stable, wrapped AUT hour value
   const autH = ((Number(data.autHours) % 24) + 24) % 24;
 
-  // Cursor position for Ray band (0..100%) across full 24 AUT hours
-  const cursorPct = (autH / 24) * 100;
-
   // Active Ray window + progress within that window
   const rayIndex = rayIndexForAUT(autH);
   const activeRay = RAY_WINDOWS[rayIndex];
   const rayRange = activeRay.end - activeRay.start;
   const rayProgress = Math.min(1, Math.max(0, (autH - activeRay.start) / rayRange));
-  const rayCursorPctWithin = rayProgress * 100; // within active window
   const remainingAUTHours = Math.max(0, activeRay.end - autH);
   const minutesPerAutHour = data.segmentLabel?.includes("Daylight")
     ? data.dayLenMin / 12
     : data.nightLenMin / 12;
   const remainingRealMin = Math.max(0, remainingAUTHours * minutesPerAutHour);
+  const segmentAngle = (2 * Math.PI) / RAY_WINDOWS.length;
+  const progressPct = Math.round(rayProgress * 100);
+  const ringSizeClass = PRESENT_ONLY ? "h-[24rem] w-[24rem]" : "h-[30rem] w-[30rem]";
+  const ringLayoutClass = "flex flex-col items-center justify-center gap-8";
+  const rayHeaderClass = PRESENT_ONLY
+    ? "flex flex-col items-center gap-2 text-center"
+    : "flex flex-wrap items-end justify-between gap-3";
+  const dialSegments = useMemo(() => {
+    const count = RAY_WINDOWS.length;
+    const offset = -Math.PI / 2;
+    return RAY_WINDOWS.map((ray, index) => {
+      const dialPosition = ((index - TOP_RAY_INDEX + count) % count + count) % count;
+      const startAngle = offset + dialPosition * segmentAngle;
+      const endAngle = startAngle + segmentAngle;
+      const midAngle = startAngle + segmentAngle / 2;
+      const path = describeWedge(RING_OUTER_RADIUS, RING_INNER_RADIUS, startAngle, endAngle);
+      const labelPosition = polarToCartesian(LABEL_RADIUS, midAngle);
+      const labelLines = splitRayLabel(ray.name);
+      return {
+        ray,
+        index,
+        dialPosition,
+        startAngle,
+        endAngle,
+        path,
+        labelX: labelPosition.x,
+        labelY: labelPosition.y,
+        labelLines,
+      };
+    });
+  }, [segmentAngle]);
+  const activeSegment = dialSegments[rayIndex];
+  const pointerAngle = activeSegment
+    ? activeSegment.startAngle + rayProgress * segmentAngle
+    : -Math.PI / 2;
+  const pointerCoord = polarToCartesian(POINTER_RADIUS, pointerAngle);
+  const pointerInner = polarToCartesian(RING_INNER_RADIUS - 6, pointerAngle);
+  const progressPath =
+    activeSegment && rayProgress > 0
+      ? describeWedge(
+          RING_OUTER_RADIUS,
+          RING_INNER_RADIUS,
+          activeSegment.startAngle,
+          activeSegment.startAngle + segmentAngle * Math.min(rayProgress, 1)
+        )
+      : null;
+  const lookupZip = useCallback(async () => {
+    const raw = zipInput.trim();
+    if (!raw) {
+      setZipError("Enter a postal or ZIP code.");
+      setZipStatus("error");
+      return;
+    }
 
-  // Tick marks every window (2 AUT hours)
-  const ticks = useMemo<Array<{ left: number }>>(
-    () => Array.from({ length: 13 }, (_, i) => ({ left: (i * 100) / 12 })),
-    []
+    let country = "us";
+    let code = raw;
+    const prefixMatch = raw.match(/^([A-Za-z]{2})[:\s-]+(.+)$/);
+    if (prefixMatch) {
+      country = prefixMatch[1].toLowerCase();
+      code = prefixMatch[2];
+    }
+
+    let normalized = code.trim();
+    if (country === "us") {
+      normalized = normalized.replace(/[^0-9]/g, "");
+      if (normalized.length >= 5) {
+        normalized = normalized.slice(0, 5);
+      }
+      if (!/^\d{5}$/.test(normalized)) {
+        setZipError("US ZIP codes must include 5 digits (you can include the +4).");
+        setZipStatus("error");
+        return;
+      }
+    } else {
+      normalized = normalized.replace(/[\s-]+/g, "").toUpperCase();
+      if (!/^[A-Z0-9]{3,}$/u.test(normalized)) {
+        setZipError("Postal codes must be alphanumeric and at least 3 characters.");
+        setZipStatus("error");
+        return;
+      }
+    }
+
+    zipControllerRef.current?.abort();
+    const controller = new AbortController();
+    zipControllerRef.current = controller;
+    setZipStatus("loading");
+    setZipError(null);
+
+    try {
+      const url = new URL(ZIP_LOOKUP_ENDPOINT);
+      url.searchParams.set("format", "json");
+      url.searchParams.set("limit", "1");
+      url.searchParams.set("postalcode", normalized);
+      url.searchParams.set("countrycodes", country.toLowerCase());
+      url.searchParams.set("addressdetails", "1");
+
+      const res = await fetch(url.toString(), {
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",
+          "User-Agent": ZIP_LOOKUP_USER_AGENT,
+        },
+      });
+      if (!res.ok) {
+        throw new Error(`Lookup failed (${res.status})`);
+      }
+      const data = await res.json();
+      const place =
+        Array.isArray(data) && data.length > 0
+          ? data[0]
+          : data && Array.isArray(data.places) && data.places.length > 0
+          ? data.places[0]
+          : undefined;
+      const lat = place ? parseFloat(place.lat ?? place.latitude) : NaN;
+      const lon = place ? parseFloat(place.lon ?? place.longitude) : NaN;
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        throw new Error("Invalid coordinates in response");
+      }
+      setCoords({ lat, lon });
+      setZipStatus("success");
+      setZipError(null);
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      setZipStatus("error");
+      setZipError(err instanceof Error ? err.message : "Could not resolve that postal code.");
+    }
+  }, [zipInput, setCoords]);
+
+  const onZipSubmit = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      void lookupZip();
+    },
+    [lookupZip]
   );
 
   return (
@@ -650,7 +985,7 @@ export default function AUTClock() {
           </div>
           <div className="text-right">
             <div className="text-sm uppercase text-zinc-400">Local Now</div>
-            <div className="text-xl md:text-2xl font-medium">{fmtLong(now)}</div>
+            <div className="text-xl md:text-2xl font-medium">{formatLongTime(now)}</div>
           </div>
         </header>
 
@@ -683,6 +1018,7 @@ export default function AUTClock() {
           <div className="text-sm text-zinc-400">
             lat {coords.lat.toFixed(4)}°, lon {coords.lon.toFixed(4)}°
           </div>
+          <div className={`text-xs ${timeZoneTone}`}>{timeZoneLine}</div>
           {locationHint ? (
             <div className={`flex items-center gap-2 text-xs ${locationHintTone}`}>
               <span>{locationHint}</span>
@@ -730,15 +1066,15 @@ export default function AUTClock() {
           <div className="grid md:grid-cols-3 gap-4 mt-6">
             <div className="rounded-xl bg-zinc-900/40 border border-zinc-700 p-4">
               <div className="text-sm text-zinc-400">Sunrise (00:00 AUT)</div>
-              <div className="text-xl font-semibold">{fmt(data.sunriseLocal)}</div>
+              <div className="text-xl font-semibold">{formatShortTime(data.sunriseLocal)}</div>
             </div>
             <div className="rounded-xl bg-zinc-900/40 border border-zinc-700 p-4">
               <div className="text-sm text-zinc-400">Solar Sunset (12:00 AUT)</div>
-              <div className="text-xl font-semibold">{fmt(data.sunsetLocal)}</div>
+              <div className="text-xl font-semibold">{formatShortTime(data.sunsetLocal)}</div>
             </div>
             <div className="rounded-xl bg-zinc-900/40 border border-zinc-700 p-4">
               <div className="text-sm text-zinc-400">Next Sunrise (24:00 AUT)</div>
-              <div className="text-xl font-semibold">{fmt(data.nextSunriseLocal)}</div>
+              <div className="text-xl font-semibold">{formatShortTime(data.nextSunriseLocal)}</div>
             </div>
           </div>
 
@@ -752,119 +1088,133 @@ export default function AUTClock() {
           </div>
         </section>
 
-        {/* Ray Windows Band — enhanced visualization */}
-        <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-4">
-          <div className="flex flex-wrap items-end justify-between gap-3">
+        {/* Ray Dial */}
+        <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
+          <div className={rayHeaderClass}>
             <div>
-              <div className="text-sm uppercase text-zinc-400">
-                Ray Windows (2 AUT hours each)
+              <div className="text-sm uppercase text-zinc-400 tracking-wide">
+                Ray Wheel & Window
               </div>
-              <div className="text-lg font-semibold">
-                Now in: <span className="underline decoration-dotted">{activeRay.name}</span>
+              <div className="text-lg font-semibold text-zinc-100">
+                Active Window: <span className="underline decoration-dotted">{activeRay.name}</span>
               </div>
             </div>
-            <div className="text-right text-sm text-zinc-300">
-              <div>{Math.round(rayProgress * 100)}% through this window</div>
+            <div className={`text-sm text-zinc-300 ${PRESENT_ONLY ? "" : "text-right"}`}>
+              <div>{progressPct}% through this window</div>
               <div>
                 ≈ {Math.ceil(remainingAUTHours * 60)} AUT min left • ≈ {Math.ceil(remainingRealMin)} real min
               </div>
             </div>
           </div>
 
-          <div className="relative w-full h-14 rounded-xl overflow-hidden border border-zinc-700 bg-zinc-800/40">
-            {/* colored bands */}
-            <div className="absolute inset-0 grid grid-cols-12">
-              {RAY_WINDOWS.map((r, i) => {
-                const isActive = i === rayIndex;
-                return (
-                  <div
-                    key={i}
-                    className={`relative flex items-center justify-center text-[11px] md:text-xs ${r.tint} bg-opacity-90 transition-transform ${
-                      isActive ? "ring-2 ring-zinc-100 scale-[1.01] z-10" : ""
-                    }`}
-                    title={`${r.name} • ${r.start.toString().padStart(2, "0")}:00–${r.end
-                      .toString()
-                      .padStart(2, "0")}:00 AUT`}
-                  >
-                    <span className="px-1 text-center drop-shadow-[0_1px_1px_rgba(0,0,0,0.35)]">{r.name}</span>
-                    {/* progress fill within the active window */}
-                    {isActive && (
-                      <div
-                        className="absolute left-0 top-0 bottom-0 bg-zinc-100/20"
-                        style={{ width: `${rayCursorPctWithin}%` }}
-                        aria-hidden
+          <div className={ringLayoutClass}>
+            <div className="relative">
+              <svg
+                viewBox="-64 -64 128 128"
+                className={`${ringSizeClass} text-zinc-100 drop-shadow-[0_6px_16px_rgba(15,23,42,0.45)]`}
+              >
+                <circle
+                  cx="0"
+                  cy="0"
+                  r={RING_OUTER_RADIUS + 4}
+                  fill="#0f172a"
+                  fillOpacity="0.35"
+                  stroke="#1e293b"
+                  strokeWidth="0.8"
+                />
+                {dialSegments.map((segment) => {
+                  const isActive = segment.index === rayIndex;
+                  return (
+                    <g key={segment.index}>
+                      <path
+                        d={segment.path}
+                        fill={segment.ray.color}
+                        fillOpacity={isActive ? 0.95 : 0.78}
+                        stroke={isActive ? "#f8fafc" : "rgba(15,23,42,0.55)"}
+                        strokeWidth={isActive ? 1.6 : 0.6}
                       />
-                    )}
-                  </div>
-                );
-              })}
+                      <text
+                        x={segment.labelX.toFixed(3)}
+                        y={segment.labelY.toFixed(3)}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        fontSize="4.6"
+                        fill={segment.ray.labelColor ?? "#e2e8f0"}
+                      >
+                        {segment.labelLines.map((line, lineIdx) => (
+                          <tspan
+                            key={`${segment.index}-${lineIdx}`}
+                            x={segment.labelX.toFixed(3)}
+                            dy={lineIdx === 0 ? (segment.labelLines.length > 1 ? "-0.2em" : "0") : "1.1em"}
+                          >
+                            {line}
+                          </tspan>
+                        ))}
+                      </text>
+                    </g>
+                  );
+                })}
+                {progressPath ? (
+                  <path d={progressPath} fill="rgba(248,250,252,0.28)" stroke="none" pointerEvents="none" />
+                ) : null}
+                <line
+                  x1={pointerInner.x.toFixed(3)}
+                  y1={pointerInner.y.toFixed(3)}
+                  x2={pointerCoord.x.toFixed(3)}
+                  y2={pointerCoord.y.toFixed(3)}
+                  stroke="#f8fafc"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                />
+                <circle cx="0" cy="0" r="6" fill="#0b1120" stroke="#f1f5f9" strokeWidth="1" />
+              </svg>
             </div>
-
-            {/* tick marks at every 2 AUT hours */}
-            {ticks.map((t, i) => (
-              <div
-                key={i}
-                className="absolute top-0 bottom-0 w-px bg-zinc-900/60"
-                style={{ left: `${t.left}%` }}
-              />
-            ))}
-
-            {/* global cursor */}
-            <div
-              className="absolute top-0 bottom-0 w-0.5 bg-zinc-100 shadow-[0_0_6px_rgba(255,255,255,0.9)]"
-              style={{ left: `${cursorPct}%` }}
-              aria-label="AUT cursor"
-            />
-
-            {/* cursor jewel */}
-            <div
-              className="absolute -top-1.5 h-3 w-3 rounded-full bg-zinc-100 shadow-[0_0_8px_rgba(255,255,255,0.85)]"
-              style={{ left: `calc(${cursorPct}% - 6px)` }}
-            />
           </div>
 
-          <div className="flex items-center justify-between text-xs text-zinc-400">
-            <div>
-              Window span: {activeRay.start.toString().padStart(2, "0")}:00 → {activeRay.end
-                .toString()
-                .padStart(2, "0")}
-              :00 AUT
-            </div>
-            <div>Cursor: {data.autClock}</div>
-          </div>
         </section>
 
-        {/* Manual Lat/Lon Input */}
-        <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-3">
-          <div className="text-sm uppercase text-zinc-400">Manual Coordinates</div>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="flex flex-col">
-              <label className="text-xs text-zinc-400">Latitude (°)</label>
-              <input
-                type="number"
-                step="0.0001"
-                className="mt-1 px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                value={coords.lat}
-                onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                  setCoords((c: Coordinates) => ({ ...c, lat: parseFloat(e.target.value) }))
+        {/* Postal Lookup */}
+        <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-4">
+          <div className="text-sm uppercase text-zinc-400">Postal / ZIP Lookup</div>
+          <form
+            onSubmit={onZipSubmit}
+            className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-start"
+          >
+            <input
+              type="text"
+              inputMode="text"
+              placeholder="e.g., 28205 or CA H0H0H0"
+              className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 sm:w-64"
+              value={zipInput}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                setZipInput(e.target.value);
+                if (zipStatus !== "idle") {
+                  setZipStatus("idle");
+                  setZipError(null);
                 }
-              />
-            </div>
-            <div className="flex flex-col">
-              <label className="text-xs text-zinc-400">Longitude (°, East + / West −)</label>
-              <input
-                type="number"
-                step="0.0001"
-                className="mt-1 px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                value={coords.lon}
-                onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                  setCoords((c: Coordinates) => ({ ...c, lon: parseFloat(e.target.value) }))
-                }
-              />
-            </div>
+              }}
+            />
+            <button
+              type="submit"
+              className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 transition shadow disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={zipStatus === "loading"}
+            >
+              {zipStatus === "loading" ? "Looking up…" : "Use Postal Code"}
+            </button>
+          </form>
+          <div className="text-xs">
+            {zipStatus === "loading" ? (
+              <span className="text-zinc-400">Fetching coordinates…</span>
+            ) : zipStatus === "success" ? (
+              <span className="text-emerald-400">Updated location from postal code.</span>
+            ) : zipStatus === "error" && zipError ? (
+              <span className="text-rose-400">{zipError}</span>
+            ) : (
+              <span className="text-zinc-500">Enter a postal/ZIP code; prefix with a country (e.g., “CA H0H0H0”).</span>
+            )}
           </div>
           <p className="text-xs text-zinc-400">
-            Tip: Positive longitude = East, Negative = West. Charlotte’s NoDa ≈ lat 35.25°, lon −80.80°.
+            Powered by Zippopotam.us — coordinates derived from the first matching place.
           </p>
         </section>
 
