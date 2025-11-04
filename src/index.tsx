@@ -1061,7 +1061,9 @@ export default function AUTClock() {
   const remainingRealMin = Math.max(0, remainingAUTHours * minutesPerAutHour);
   const segmentAngle = (2 * Math.PI) / RAY_WINDOWS.length;
   const progressPct = Math.round(rayProgress * 100);
-  const ringSizeClass = PRESENT_ONLY ? "h-[24rem] w-[24rem]" : "h-[30rem] w-[30rem]";
+  const ringSizeClass = PRESENT_ONLY
+    ? "h-[18rem] w-[18rem] sm:h-[22rem] sm:w-[22rem] xl:h-[24rem] xl:w-[24rem]"
+    : "h-[20rem] w-[20rem] sm:h-[24rem] sm:w-[24rem] lg:h-[28rem] lg:w-[28rem] xl:h-[30rem] xl:w-[30rem]";
   const ringLayoutClass = "flex flex-col items-center justify-center gap-8";
   const rayHeaderClass = PRESENT_ONLY
     ? "flex flex-col items-center gap-2 text-center"
