@@ -12,6 +12,7 @@ import { PRESENT_ONLY } from "./config/rays";
 import { ZIP_LOOKUP_ENDPOINT, ZIP_LOOKUP_USER_AGENT } from "./config/geocode";
 import { LunaRuntime } from "./lib/lunaRuntime";
 import { SolRuntime } from "./lib/solRuntime";
+import { AtlasCometMap } from "./comet/AtlasCometMap";
 
 /**
  * Alastizen Universal Time (AUT) — Live Clock ✨
@@ -1264,8 +1265,9 @@ export default function AUTClock() {
   // Active Ray window + progress within that window
   const rayIndex = rayIndexForAUT(autH);
   const activeRay = RAY_WINDOWS[rayIndex];
-  const rayRange = activeRay.end - activeRay.start;
-  const rayProgress = Math.min(1, Math.max(0, (autH - activeRay.start) / rayRange));
+  const rayRange = Math.max(1e-6, activeRay.end - activeRay.start);
+  const rawProgress = (autH - activeRay.start) / rayRange;
+  const rayProgress = Math.min(1, Math.max(0, rawProgress));
   const remainingAUTHours = Math.max(0, activeRay.end - autH);
   const minutesPerAutHour = data.segmentLabel?.includes("Daylight")
     ? data.dayLenMin / 12
@@ -1418,7 +1420,7 @@ export default function AUTClock() {
         <header className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
           <div>
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
-              Alastizen Universal Time
+              Atlastizen Universal Time
             </h1>
             <p className="text-zinc-300">
               Sunrise → 00:00 AUT • Sunset → 12:00 AUT • Next Sunrise → 24:00 AUT
@@ -1858,6 +1860,17 @@ export default function AUTClock() {
               Lunar track unavailable for this location/time.
             </div>
           )}
+        </section>
+
+        {/* Heartlight System Map */}
+        <section className="rounded-2xl border border-sky-500/30 bg-slate-900/60 p-6 space-y-4">
+          <div className="flex flex-col gap-1">
+            <div className="text-sm uppercase tracking-wide text-sky-200/80">
+              Heartlight System Map
+            </div>
+            <p className="text-sm text-slate-300">Pan, zoom, and sweep through time to watch each planet trace its Keplerian ellipse.</p>
+          </div>
+          <AtlasCometMap />
         </section>
 
         {/* Gyro Compass */}
