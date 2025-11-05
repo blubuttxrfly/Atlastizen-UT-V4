@@ -1,7 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useId,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
 import { PRESENT_ONLY } from "./config/rays";
 import { ZIP_LOOKUP_ENDPOINT, ZIP_LOOKUP_USER_AGENT } from "./config/geocode";
 import { LunaRuntime } from "./lib/lunaRuntime";
+import { SolRuntime } from "./lib/solRuntime";
 
 /**
  * Alastizen Universal Time (AUT) — Live Clock ✨
@@ -167,6 +177,227 @@ function headingToLabel(degrees: number): string {
   const normalized = normalizeDegrees(degrees);
   const index = Math.round(normalized / 45) % COMPASS_CARDINALS.length;
   return COMPASS_CARDINALS[index];
+}
+
+type HorizonTrackPoint = { ts: Date; alt: number; az: number };
+type HorizonArcPoint = HorizonTrackPoint & { x: number; y: number; cappedAlt: number };
+type HorizonArc = {
+  width: number;
+  height: number;
+  leftPadding: number;
+  rightPadding: number;
+  topPadding: number;
+  bottomPadding: number;
+  chartWidth: number;
+  chartHeight: number;
+  path: string;
+  areaPath: string | null;
+  horizonY: number;
+  bands: Array<{ label: string; y: number }>;
+  points: HorizonArcPoint[];
+  current: HorizonArcPoint | null;
+};
+
+function buildHorizonArc(
+  track: HorizonTrackPoint[],
+  now: Date,
+  options?: { minAltitude?: number; maxAltitude?: number }
+): HorizonArc | null {
+  if (!track || track.length < 2) return null;
+
+  const width = 360;
+  const height = 200;
+  const leftPadding = 28;
+  const rightPadding = 28;
+  const topPadding = 18;
+  const bottomPadding = 28;
+  const chartWidth = width - leftPadding - rightPadding;
+  const chartHeight = height - topPadding - bottomPadding;
+  const minAlt = options?.minAltitude ?? -10;
+  const maxAlt = options?.maxAltitude ?? 90;
+  const clampAltitude = (alt: number) => Math.max(minAlt, Math.min(maxAlt, alt));
+
+  const points: HorizonArcPoint[] = track.map((entry) => {
+    const azRad = (entry.az * Math.PI) / 180;
+    const xNorm = (1 - Math.sin(azRad)) / 2; // East left, West right
+    const cappedAlt = clampAltitude(entry.alt);
+    const altNorm = (cappedAlt - minAlt) / (maxAlt - minAlt);
+    const x = leftPadding + xNorm * chartWidth;
+    const y = topPadding + (1 - altNorm) * chartHeight;
+    return { ...entry, x, y, cappedAlt };
+  });
+
+  const horizonAltNorm = (0 - minAlt) / (maxAlt - minAlt);
+  const horizonY = topPadding + (1 - horizonAltNorm) * chartHeight;
+
+  const path = points
+    .map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`)
+    .join(" ");
+
+  const areaPoints = points.map((point) => ({
+    x: point.x,
+    y: Math.min(point.y, horizonY),
+  }));
+
+  const areaPath =
+    areaPoints.length >= 2
+      ? [
+          `M${areaPoints[0].x.toFixed(1)},${horizonY.toFixed(1)}`,
+          ...areaPoints.map((point) => `L${point.x.toFixed(1)},${point.y.toFixed(1)}`),
+          `L${areaPoints[areaPoints.length - 1].x.toFixed(1)},${horizonY.toFixed(1)}`,
+          "Z",
+        ].join(" ")
+      : null;
+
+  const sixtyAltNorm = (60 - minAlt) / (maxAlt - minAlt);
+  const thirtyAltNorm = (30 - minAlt) / (maxAlt - minAlt);
+  const bands = [
+    { label: "60°", y: topPadding + (1 - sixtyAltNorm) * chartHeight },
+    { label: "30°", y: topPadding + (1 - thirtyAltNorm) * chartHeight },
+  ];
+
+  const nowMs = now.getTime();
+  const current = points.reduce<{ diff: number; point: HorizonArcPoint | null }>(
+    (best, point) => {
+      const diff = Math.abs(point.ts.getTime() - nowMs);
+      return diff < best.diff ? { diff, point } : best;
+    },
+    { diff: Number.POSITIVE_INFINITY, point: null }
+  ).point;
+
+  return {
+    width,
+    height,
+    leftPadding,
+    rightPadding,
+    topPadding,
+    bottomPadding,
+    chartWidth,
+    chartHeight,
+    path,
+    areaPath,
+    horizonY,
+    bands,
+    points,
+    current,
+  };
+}
+
+type MoonPhaseKey =
+  | "new"
+  | "waxing-crescent"
+  | "first-quarter"
+  | "waxing-gibbous"
+  | "full"
+  | "waning-gibbous"
+  | "last-quarter"
+  | "waning-crescent";
+
+const MOON_PHASE_GRADIENTS: Record<
+  MoonPhaseKey,
+  { stops: Array<{ offset: number; color: string }>; reverse?: boolean } | null
+> = {
+  new: null,
+  full: null,
+  "waxing-crescent": {
+    stops: [
+      { offset: 0.0, color: "#0f172a" },
+      { offset: 0.45, color: "#0f172a" },
+      { offset: 0.52, color: "#f8fafc" },
+      { offset: 1.0, color: "#f8fafc" },
+    ],
+  },
+  "waning-crescent": {
+    stops: [
+      { offset: 0.0, color: "#0f172a" },
+      { offset: 0.45, color: "#0f172a" },
+      { offset: 0.52, color: "#f8fafc" },
+      { offset: 1.0, color: "#f8fafc" },
+    ],
+    reverse: true,
+  },
+  "first-quarter": {
+    stops: [
+      { offset: 0.0, color: "#0f172a" },
+      { offset: 0.5, color: "#0f172a" },
+      { offset: 0.5, color: "#f8fafc" },
+      { offset: 1.0, color: "#f8fafc" },
+    ],
+  },
+  "last-quarter": {
+    stops: [
+      { offset: 0.0, color: "#0f172a" },
+      { offset: 0.5, color: "#0f172a" },
+      { offset: 0.5, color: "#f8fafc" },
+      { offset: 1.0, color: "#f8fafc" },
+    ],
+    reverse: true,
+  },
+  "waxing-gibbous": {
+    stops: [
+      { offset: 0.0, color: "#0f172a" },
+      { offset: 0.2, color: "#0f172a" },
+      { offset: 0.45, color: "#f8fafc" },
+      { offset: 1.0, color: "#f8fafc" },
+    ],
+  },
+  "waning-gibbous": {
+    stops: [
+      { offset: 0.0, color: "#0f172a" },
+      { offset: 0.2, color: "#0f172a" },
+      { offset: 0.45, color: "#f8fafc" },
+      { offset: 1.0, color: "#f8fafc" },
+    ],
+    reverse: true,
+  },
+};
+
+function getMoonPhaseKey(phaseName: string): MoonPhaseKey {
+  const normalized = phaseName.toLowerCase();
+  if (normalized.includes("new")) return "new";
+  if (normalized.includes("waxing crescent")) return "waxing-crescent";
+  if (normalized.includes("first quarter")) return "first-quarter";
+  if (normalized.includes("waxing gibbous")) return "waxing-gibbous";
+  if (normalized.includes("full")) return "full";
+  if (normalized.includes("waning gibbous")) return "waning-gibbous";
+  if (normalized.includes("last quarter") || normalized.includes("third quarter")) return "last-quarter";
+  if (normalized.includes("waning crescent")) return "waning-crescent";
+  return "full";
+}
+
+function MoonPhaseIcon({ phaseName }: { phaseName: string }) {
+  const id = useId();
+  const key = getMoonPhaseKey(phaseName);
+  const gradientConfig = MOON_PHASE_GRADIENTS[key];
+  const gradientId = `${id}-moon-phase`;
+
+  return (
+    <svg width="52" height="52" viewBox="0 0 48 48" aria-hidden="true" className="shrink-0">
+      <circle cx="24" cy="24" r="22" fill="#0f172a" stroke="#f8fafc" strokeWidth="1.5" />
+      {key === "full" ? (
+        <circle cx="24" cy="24" r="20" fill="#f8fafc" />
+      ) : key === "new" ? (
+        <circle cx="24" cy="24" r="20" fill="rgba(148,163,184,0.12)" />
+      ) : (
+        <>
+          <defs>
+            <linearGradient
+              id={gradientId}
+              x1={gradientConfig?.reverse ? "100%" : "0%"}
+              y1="0%"
+              x2={gradientConfig?.reverse ? "0%" : "100%"}
+              y2="0%"
+            >
+              {gradientConfig?.stops.map((stop, idx) => (
+                <stop key={idx} offset={`${stop.offset * 100}%`} stopColor={stop.color} />
+              ))}
+            </linearGradient>
+          </defs>
+          <circle cx="24" cy="24" r="20" fill={`url(#${gradientId})`} />
+        </>
+      )}
+    </svg>
+  );
 }
 
 function formatOffset(minutes: number): string {
@@ -820,6 +1051,13 @@ export default function AUTClock() {
     () => computeAUT(now, coords.lat, coords.lon),
     [now, coords]
   );
+  const sol = useMemo(() => {
+    try {
+      return SolRuntime.now(coords.lat, coords.lon, now);
+    } catch {
+      return null;
+    }
+  }, [coords.lat, coords.lon, now]);
   const luna = useMemo(() => {
     try {
       return LunaRuntime.now(coords.lat, coords.lon, now);
@@ -827,78 +1065,8 @@ export default function AUTClock() {
       return null;
     }
   }, [coords.lat, coords.lon, now]);
-  const moonArc = useMemo(() => {
-    if (!luna || luna.tonight.length < 2) return null;
-    const width = 360;
-    const height = 200;
-    const leftPadding = 28;
-    const rightPadding = 28;
-    const topPadding = 18;
-    const bottomPadding = 28;
-    const chartWidth = width - leftPadding - rightPadding;
-    const chartHeight = height - topPadding - bottomPadding;
-    const minAlt = -10;
-    const maxAlt = 90;
-    const clampAltitude = (alt: number) => Math.max(minAlt, Math.min(maxAlt, alt));
-    const sample = (entry: (typeof luna.tonight)[number]) => {
-      const azRad = (entry.az * Math.PI) / 180;
-      const xNorm = (1 - Math.sin(azRad)) / 2; // East left, West right
-      const cappedAlt = clampAltitude(entry.alt);
-      const altNorm = (cappedAlt - minAlt) / (maxAlt - minAlt);
-      const x = leftPadding + xNorm * chartWidth;
-      const y = topPadding + (1 - altNorm) * chartHeight;
-      return { ...entry, x, y, cappedAlt };
-    };
-    const points = luna.tonight.map(sample);
-    const horizonAltNorm = (0 - minAlt) / (maxAlt - minAlt);
-    const horizonY = topPadding + (1 - horizonAltNorm) * chartHeight;
-    const path = points
-      .map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x.toFixed(1)},${point.y.toFixed(1)}`)
-      .join(" ");
-    const areaPoints = points.map((point) => ({
-      x: point.x,
-      y: Math.min(point.y, horizonY),
-    }));
-    const areaPath =
-      areaPoints.length >= 2
-        ? [
-            `M${areaPoints[0].x.toFixed(1)},${horizonY.toFixed(1)}`,
-            ...areaPoints.map((point) => `L${point.x.toFixed(1)},${point.y.toFixed(1)}`),
-            `L${areaPoints[areaPoints.length - 1].x.toFixed(1)},${horizonY.toFixed(1)}`,
-            "Z",
-          ].join(" ")
-        : null;
-    const sixtyAltNorm = (60 - minAlt) / (maxAlt - minAlt);
-    const thirtyAltNorm = (30 - minAlt) / (maxAlt - minAlt);
-    const bands = [
-      { label: "60°", y: topPadding + (1 - sixtyAltNorm) * chartHeight },
-      { label: "30°", y: topPadding + (1 - thirtyAltNorm) * chartHeight },
-    ];
-    const nowMs = now.getTime();
-    const current = points.reduce<{ diff: number; point: typeof points[number] | null }>(
-      (best, point) => {
-        const diff = Math.abs(point.ts.getTime() - nowMs);
-        return diff < best.diff ? { diff, point } : best;
-      },
-      { diff: Number.POSITIVE_INFINITY, point: null }
-    ).point;
-    return {
-      width,
-      height,
-      leftPadding,
-      rightPadding,
-      topPadding,
-      bottomPadding,
-      chartWidth,
-      chartHeight,
-      path,
-      areaPath,
-      horizonY,
-      bands,
-      points,
-      current,
-    };
-  }, [luna, now]);
+  const solArc = useMemo(() => buildHorizonArc(sol?.track ?? [], now), [sol, now]);
+  const moonArc = useMemo(() => buildHorizonArc(luna?.tonight ?? [], now), [luna, now]);
   const pct = Math.max(0, Math.min(100, Math.round(data.progress * 100)));
 
   const locationTimeZoneId = timeZoneInfo?.timeZone;
@@ -931,13 +1099,27 @@ export default function AUTClock() {
         }),
     };
   }, [locationTimeZoneId]);
+  const formatSolTime = (date?: Date) => (date ? formatShortTime(date) : "—");
   const formatMoonTime = (date?: Date) => (date ? formatShortTime(date) : "—");
+  const solDeclStr = sol ? `${sol.decDeg >= 0 ? "+" : ""}${sol.decDeg.toFixed(2)}°` : "—";
+  const solAltStr = sol ? `${sol.altDeg >= 0 ? "+" : ""}${sol.altDeg.toFixed(1)}°` : "—";
+  const solAzStr = sol ? `${sol.azDeg.toFixed(1)}°` : "—";
+  const solRiseLocal = formatSolTime(sol?.rise);
+  const solTransitLocal = formatSolTime(sol?.transit);
+  const solSetLocal = formatSolTime(sol?.set);
+  const solTransitAltStr =
+    typeof sol?.transitAltDeg === "number" ? `${sol.transitAltDeg.toFixed(1)}°` : "—";
   const moonDeclStr = luna ? `${luna.decDeg >= 0 ? "+" : ""}${luna.decDeg.toFixed(2)}°` : "—";
   const moonAltStr = luna ? `${luna.altDeg >= 0 ? "+" : ""}${luna.altDeg.toFixed(1)}°` : "—";
   const moonAzStr = luna ? `${luna.azDeg.toFixed(1)}°` : "—";
   const moonIllumPct = luna ? Math.round(luna.illum * 100) : null;
   const moonPhaseName = luna?.phaseName ?? "—";
   const solsticeLinked = !!luna && Math.abs(luna.decDeg) >= 23.44;
+  const solRiseAut = sol?.rise ? computeAUT(sol.rise, coords.lat, coords.lon).autClock : "—";
+  const solTransitAut = sol?.transit
+    ? computeAUT(sol.transit, coords.lat, coords.lon).autClock
+    : "—";
+  const solSetAut = sol?.set ? computeAUT(sol.set, coords.lat, coords.lon).autClock : "—";
   const moonRiseLocal = formatMoonTime(luna?.rise);
   const moonTransitLocal = formatMoonTime(luna?.transit);
   const moonSetLocal = formatMoonTime(luna?.set);
@@ -948,11 +1130,41 @@ export default function AUTClock() {
   const moonSetAut = luna?.set ? computeAUT(luna.set, coords.lat, coords.lon).autClock : "—";
   const moonTransitAltStr =
     typeof luna?.transitAltDeg === "number" ? `${luna.transitAltDeg.toFixed(1)}°` : "—";
+  const solArcStart = sol && sol.track.length > 0 ? sol.track[0]?.ts : undefined;
+  const solArcEnd = sol && sol.track.length > 0 ? sol.track[sol.track.length - 1]?.ts : undefined;
+  const solArcStartLabel = formatSolTime(solArcStart);
+  const solArcEndLabel = formatSolTime(solArcEnd);
+  const solArcRangeLabel =
+    solArcStartLabel && solArcEndLabel
+      ? `${solArcStartLabel} → ${solArcEndLabel}${
+          solArcStart && solArcEnd && solArcEnd.getTime() - solArcStart.getTime() >= 23 * 60 * 60 * 1000
+            ? " (next day)"
+            : ""
+        }`
+      : "—";
   const moonArcStart = luna && luna.tonight.length > 0 ? luna.tonight[0]?.ts : undefined;
   const moonArcEnd =
     luna && luna.tonight.length > 0 ? luna.tonight[luna.tonight.length - 1]?.ts : undefined;
   const moonArcStartLabel = formatMoonTime(moonArcStart);
   const moonArcEndLabel = formatMoonTime(moonArcEnd);
+  const moonArcRangeLabel =
+    moonArcStartLabel && moonArcEndLabel
+      ? `${moonArcStartLabel} → ${moonArcEndLabel}${
+          moonArcStart && moonArcEnd && moonArcEnd.getTime() - moonArcStart.getTime() >= 23 * 60 * 60 * 1000
+            ? " (next day)"
+            : ""
+        }`
+      : "—";
+  const solArcColor = sol
+    ? "rgba(253,224,71,0.9)"
+    : "rgba(250,250,250,0.7)";
+  const solArcFillColor = sol
+    ? "rgba(253,224,71,0.2)"
+    : "rgba(226,232,240,0.12)";
+  const solLegendPathColor = solArcColor;
+  const solLegendHorizonColor = "rgba(248,250,252,0.45)";
+  const solLegendBandColor = "rgba(253,224,71,0.3)";
+  const solLegendIconColor = "#fde68a";
   const moonArcColor = luna
     ? luna.decDeg >= 0
       ? "rgba(56,189,248,0.85)"
@@ -1317,6 +1529,162 @@ export default function AUTClock() {
           </div>
         </section>
 
+        {/* Sol Panel */}
+        <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-sm uppercase tracking-wide text-zinc-400">Sol (Sun)</div>
+              <div className="text-4xl font-bold tabular-nums">
+                δ☉ <span className="text-amber-300">{solDeclStr}</span>
+              </div>
+              <div className="text-sm text-zinc-300">
+                Alt {solAltStr} • Az {solAzStr}
+              </div>
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+              <div className="uppercase tracking-wide text-amber-200/70">Sunrise</div>
+              <div className="text-2xl font-semibold text-amber-100">{solRiseAut}</div>
+              <div className="text-xs text-amber-100/80">Local {solRiseLocal}</div>
+            </div>
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+              <div className="uppercase tracking-wide text-amber-200/70">Solar Noon</div>
+              <div className="text-2xl font-semibold text-amber-100">{solTransitAut}</div>
+              <div className="text-xs text-amber-100/80">
+                Local {solTransitLocal} • Alt {solTransitAltStr}
+              </div>
+            </div>
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+              <div className="uppercase tracking-wide text-amber-200/70">Sunset</div>
+              <div className="text-2xl font-semibold text-amber-100">{solSetAut}</div>
+              <div className="text-xs text-amber-100/80">Local {solSetLocal}</div>
+            </div>
+          </div>
+
+          {solArc ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs uppercase tracking-wide text-zinc-400">
+                Day Horizon Track
+                <span className="normal-case">{solArcRangeLabel}</span>
+              </div>
+              <div className="relative mx-auto w-full max-w-xl">
+                <svg
+                  viewBox={`0 0 ${solArc.width} ${solArc.height}`}
+                  className="w-full drop-shadow-[0_10px_24px_rgba(12,18,30,0.35)]"
+                  role="presentation"
+                >
+                  <rect
+                    x="0"
+                    y="0"
+                    width={solArc.width}
+                    height={solArc.height}
+                    fill="rgba(20,24,40,0.35)"
+                    rx="14"
+                  />
+                  {solArc.areaPath ? (
+                    <path d={solArc.areaPath} fill={solArcFillColor} stroke="none" />
+                  ) : null}
+                  {solArc.bands.map((band) => (
+                    <line
+                      key={band.label}
+                      x1={solArc.leftPadding}
+                      x2={solArc.width - solArc.rightPadding}
+                      y1={band.y}
+                      y2={band.y}
+                      stroke={solLegendBandColor}
+                      strokeDasharray="6 6"
+                      strokeWidth="1"
+                    />
+                  ))}
+                  <line
+                    x1={solArc.leftPadding}
+                    x2={solArc.width - solArc.rightPadding}
+                    y1={solArc.horizonY}
+                    y2={solArc.horizonY}
+                    stroke={solLegendHorizonColor}
+                    strokeDasharray="4 4"
+                    strokeWidth="1.4"
+                  />
+                  <path
+                    d={solArc.path}
+                    fill="none"
+                    stroke={solArcColor}
+                    strokeWidth="2.8"
+                    strokeLinecap="round"
+                  />
+                  {solArc.current ? (
+                    <g>
+                      <circle
+                        cx={solArc.current.x}
+                        cy={solArc.current.y}
+                        r={7}
+                        fill={solLegendIconColor}
+                        stroke={solArcColor}
+                        strokeWidth="1.5"
+                      />
+                      <path
+                        d={`
+                          M ${solArc.current.x - 4} ${solArc.current.y}
+                          q 4 -7 8 0
+                          q -4 7 -8 0
+                        `}
+                        fill={solArcColor}
+                        fillOpacity={0.35}
+                      />
+                    </g>
+                  ) : null}
+                </svg>
+                <span className="pointer-events-none absolute left-0 bottom-6 -translate-x-1/2 text-[0.65rem] uppercase tracking-[0.2em] text-zinc-500">
+                  East
+                </span>
+                <span className="pointer-events-none absolute right-0 bottom-6 translate-x-1/2 text-[0.65rem] uppercase tracking-[0.2em] text-zinc-500">
+                  West
+                </span>
+                <span className="pointer-events-none absolute left-1/2 bottom-2 -translate-x-1/2 text-[0.65rem] uppercase tracking-[0.2em] text-zinc-500">
+                  South
+                </span>
+                <span className="pointer-events-none absolute left-1/2 top-2 -translate-x-1/2 text-[0.65rem] uppercase tracking-[0.2em] text-zinc-500">
+                  Up / Zenith
+                </span>
+              </div>
+              <div className="grid gap-2 text-xs text-zinc-400 sm:grid-cols-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-flex h-2 w-10 rounded-full"
+                    style={{ backgroundColor: solLegendPathColor }}
+                    aria-hidden="true"
+                  />
+                  <span>Sun path (East → West)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-flex w-10 border-b border-dashed"
+                    style={{ borderBottomColor: solLegendHorizonColor }}
+                    aria-hidden="true"
+                  />
+                  <span>Horizon (0° altitude)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-flex h-3 w-3 rounded-full"
+                    style={{ backgroundColor: solLegendIconColor, boxShadow: `0 0 0 1px ${solArcColor}` }}
+                    aria-hidden="true"
+                  />
+                  <span>Live Sun position</span>
+                </div>
+              </div>
+              <div className="text-xs text-zinc-500">
+                δ☉ = Sun declination (°) — angular height of the Sun’s path relative to Earth’s equator.
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-zinc-700 p-6 text-center text-sm text-zinc-400">
+              Solar track unavailable for this location/time.
+            </div>
+          )}
+        </section>
+
         {/* Luna Panel */}
         <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -1329,21 +1697,24 @@ export default function AUTClock() {
                 Alt {moonAltStr} • Az {moonAzStr}
               </div>
             </div>
-            <div className="text-right space-y-1">
-              <div className="text-sm text-zinc-300">Illumination</div>
-              <div className="text-2xl font-semibold">
-                {moonIllumPct !== null ? `${moonIllumPct}%` : "—"}
+            <div className="flex items-center justify-end gap-4">
+              <MoonPhaseIcon phaseName={moonPhaseName} />
+              <div className="space-y-1 text-right">
+                <div className="text-sm text-zinc-300">Illumination</div>
+                <div className="text-2xl font-semibold">
+                  {moonIllumPct !== null ? `${moonIllumPct}%` : "—"}
+                </div>
+                <div className="text-xs uppercase tracking-wide text-zinc-400">
+                  Phase <span className="text-zinc-200 normal-case">{moonPhaseName}</span>
+                </div>
+                {solsticeLinked ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-200">
+                    Solstice-Linked Arc
+                  </span>
+                ) : (
+                  <span className="text-xs text-zinc-400">|δₘ| &lt; 23.44°</span>
+                )}
               </div>
-              <div className="text-xs uppercase tracking-wide text-zinc-400">
-                Phase <span className="text-zinc-200 normal-case">{moonPhaseName}</span>
-              </div>
-              {solsticeLinked ? (
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-200">
-                  Solstice-Linked Arc
-                </span>
-              ) : (
-                <span className="text-xs text-zinc-400">|δₘ| &lt; 23.44°</span>
-              )}
             </div>
           </div>
 
@@ -1370,9 +1741,7 @@ export default function AUTClock() {
             <div className="space-y-3">
               <div className="flex items-center justify-between text-xs uppercase tracking-wide text-zinc-400">
                 Tonight Horizon Track
-                <span className="normal-case">
-                  {moonArcStartLabel} → {moonArcEndLabel}
-                </span>
+                <span className="normal-case">{moonArcRangeLabel}</span>
               </div>
               <div className="relative mx-auto w-full max-w-xl">
                 <svg
