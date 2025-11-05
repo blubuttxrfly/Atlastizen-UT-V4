@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-
 type Vec2 = { x: number; y: number };
 
 type Planet = {
@@ -14,6 +13,11 @@ type Planet = {
   spots?: Array<{ color: string; radius: number; offset: Vec2 }>;
 };
 
+type OverlayOptions = {
+  showZodiac: boolean;
+  showEclipticGrid: boolean;
+};
+
 const PLANETS: Planet[] = [
   { name: "Mercury", a: 0.387, e: 0.2056, periodDays: 87.969, baseColor: "#a8a8a8", gradient: { inner: "#f4f4f4", outer: "#7b7b7b" } },
   { name: "Venus", a: 0.723, e: 0.0068, periodDays: 224.701, baseColor: "#e0c080", gradient: { inner: "#fff2cc", outer: "#c89f60" } },
@@ -26,8 +30,17 @@ const PLANETS: Planet[] = [
   { name: "Pluto", a: 39.48, e: 0.2488, periodDays: 90560, baseColor: "#cdb4ff", gradient: { inner: "#e6dcff", outer: "#9d86c6" } },
 ];
 
+const MOON: Planet = {
+  name: "Moon",
+  a: 0.00257,
+  e: 0.0549,
+  periodDays: 27.321582,
+  baseColor: "#d4d4d8",
+  gradient: { inner: "#f8fafc", outer: "#9ca3af" },
+};
+
 const ORBIT_SAMPLES = 512;
-const INITIAL_DATE = new Date(Date.UTC(2025, 5, 1));
+const INITIAL_DATE = new Date();
 const AU_PER_PX_AT_1X = 1 / 260; // 260 px per AU at scale = 1
 const SCALE_EXP = 0.45;
 const ICON_BASE = 6;
@@ -36,9 +49,28 @@ const ICON_MAX = 36;
 const FONT_BASE = 11;
 const FONT_MIN = 7;
 const FONT_MAX = 20;
-const SCALE_MIN = 0.15;
+const SCALE_MIN = 0.03;
 const SCALE_MAX = 18;
 const CANVAS_SIZE = 560;
+const MOON_VIS_MIN_PX = 10;
+const MOON_VIS_MAX_PX = 28;
+const LERP_SOFTEN_PX = 6;
+const DEG2RAD = Math.PI / 180;
+const ZODIAC_SIGNS = [
+  { name: "Aries", symbol: "♈︎" },
+  { name: "Taurus", symbol: "♉︎" },
+  { name: "Gemini", symbol: "♊︎" },
+  { name: "Cancer", symbol: "♋︎" },
+  { name: "Leo", symbol: "♌︎" },
+  { name: "Virgo", symbol: "♍︎" },
+  { name: "Libra", symbol: "♎︎" },
+  { name: "Scorpius", symbol: "♏︎" },
+  { name: "Sagittarius", symbol: "♐︎" },
+  { name: "Capricornus", symbol: "♑︎" },
+  { name: "Aquarius", symbol: "♒︎" },
+  { name: "Pisces", symbol: "♓︎" },
+];
+const ZODIAC_RING_RADIUS_AU = 44;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -89,15 +121,17 @@ function HeartlightSystemMap() {
   const cameraRef = useRef<Vec2>({ x: 0, y: 0 });
   const scaleRef = useRef(0.6);
   const timeRef = useRef(INITIAL_DATE.getTime());
-  const runningRef = useRef(true);
+  const runningRef = useRef(false);
   const timeScaleRef = useRef(4);
   const sizeRef = useRef<{ width: number; height: number }>({ width: CANVAS_SIZE, height: CANVAS_SIZE });
   const draggingRef = useRef(false);
   const lastPointerRef = useRef<Vec2>({ x: 0, y: 0 });
 
   const [displayTime, setDisplayTime] = useState(INITIAL_DATE);
-  const [running, setRunning] = useState(true);
+  const [running, setRunning] = useState(false);
   const [timeScale] = useState(4);
+  const [showZodiac, setShowZodiac] = useState(true);
+  const [showEclipticGrid, setShowEclipticGrid] = useState(false);
 
   const orbitCache = useMemo(() => {
     const cache = new Map<string, Vec2[]>();
@@ -169,14 +203,21 @@ function HeartlightSystemMap() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.scale(dpr, dpr);
 
-      drawScene(ctx, orbitCache, new Date(timeRef.current), worldToScreen, scaleRef.current);
+      drawScene(
+        ctx,
+        orbitCache,
+        new Date(timeRef.current),
+        worldToScreen,
+        scaleRef.current,
+        { showZodiac, showEclipticGrid }
+      );
 
       raf = requestAnimationFrame(render);
     };
 
     raf = requestAnimationFrame(render);
     return () => cancelAnimationFrame(raf);
-  }, [orbitCache]);
+  }, [orbitCache, showZodiac, showEclipticGrid]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -341,14 +382,34 @@ function HeartlightSystemMap() {
             Reset View
           </button>
         </div>
+        <div className="flex w-full flex-wrap items-center gap-3 border-t border-sky-500/20 pt-3 text-[0.65rem] uppercase tracking-wide text-sky-200/80">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-sky-500 bg-slate-900/80 text-sky-500 focus:ring-sky-400"
+              checked={showZodiac}
+              onChange={(event) => setShowZodiac(event.target.checked)}
+            />
+            Zodiac
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-sky-500 bg-slate-900/80 text-sky-500 focus:ring-sky-400"
+              checked={showEclipticGrid}
+              onChange={(event) => setShowEclipticGrid(event.target.checked)}
+            />
+            Ecliptic Grid
+          </label>
+        </div>
       </div>
 
-      <div className="relative mx-auto flex flex-col items-center gap-3 rounded-2xl border border-sky-500/30 bg-slate-900/70 p-4">
+      <div className="relative mx-auto flex w-full max-w-[640px] flex-col items-center gap-3 rounded-2xl border border-sky-500/30 bg-slate-900/70 p-4">
         <canvas
           ref={canvasRef}
           width={CANVAS_SIZE}
           height={CANVAS_SIZE}
-          style={{ width: `${CANVAS_SIZE}px`, height: `${CANVAS_SIZE}px`, display: "block" }}
+          className="block aspect-square w-full max-w-[560px]"
         />
       </div>
 
@@ -366,7 +427,8 @@ function drawScene(
   orbitCache: Map<string, Vec2[]>,
   time: Date,
   worldToScreen: (point: Vec2) => Vec2,
-  scale: number
+  scale: number,
+  overlays: OverlayOptions
 ) {
   const width = ctx.canvas.width / (window.devicePixelRatio ?? 1);
   const height = ctx.canvas.height / (window.devicePixelRatio ?? 1);
@@ -374,6 +436,13 @@ function drawScene(
   ctx.save();
   ctx.fillStyle = "#030712";
   ctx.fillRect(0, 0, width, height);
+
+  if (overlays.showEclipticGrid) {
+    drawEclipticGrid(ctx, worldToScreen, scale);
+  }
+  if (overlays.showZodiac) {
+    drawZodiacRing(ctx, worldToScreen, scale);
+  }
 
   orbitCache.forEach((points) => {
     if (points.length === 0) return;
@@ -390,6 +459,125 @@ function drawScene(
 
   drawSun(ctx, worldToScreen, scale);
   drawPlanets(ctx, time, worldToScreen, scale);
+  ctx.restore();
+}
+
+function drawZodiacRing(
+  ctx: CanvasRenderingContext2D,
+  worldToScreen: (point: Vec2) => Vec2,
+  scale: number
+) {
+  const center = worldToScreen({ x: 0, y: 0 });
+  const radiusPoint = worldToScreen({ x: ZODIAC_RING_RADIUS_AU, y: 0 });
+  const radiusPx = Math.hypot(radiusPoint.x - center.x, radiusPoint.y - center.y);
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(56,189,248,0.28)";
+  ctx.lineWidth = clamp(scale * 0.4, 0.6, 1.6);
+  ctx.beginPath();
+  ctx.arc(center.x, center.y, radiusPx, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.textAlign = "center";
+
+  for (let i = 0; i < 12; i += 1) {
+    const angle = (i / 12) * Math.PI * 2;
+    const lineInner = worldToScreen({
+      x: Math.cos(angle) * (ZODIAC_RING_RADIUS_AU * 0.94),
+      y: Math.sin(angle) * (ZODIAC_RING_RADIUS_AU * 0.94),
+    });
+    const lineOuter = worldToScreen({
+      x: Math.cos(angle) * (ZODIAC_RING_RADIUS_AU * 1.02),
+      y: Math.sin(angle) * (ZODIAC_RING_RADIUS_AU * 1.02),
+    });
+    ctx.beginPath();
+    ctx.moveTo(lineInner.x, lineInner.y);
+    ctx.lineTo(lineOuter.x, lineOuter.y);
+    ctx.stroke();
+
+    const sign = ZODIAC_SIGNS[i];
+    const midAngle = angle + Math.PI / 12;
+    const symbolPx = clamp(18 * Math.pow(scale, SCALE_EXP * 0.9), 14, 34);
+    const namePx = clamp(10 * Math.pow(scale, SCALE_EXP * 0.7), 8, 16);
+    const labelPoint = worldToScreen({
+      x: Math.cos(midAngle) * (ZODIAC_RING_RADIUS_AU * 1.07),
+      y: Math.sin(midAngle) * (ZODIAC_RING_RADIUS_AU * 1.07),
+    });
+    const namePoint = worldToScreen({
+      x: Math.cos(midAngle) * (ZODIAC_RING_RADIUS_AU * 1.14),
+      y: Math.sin(midAngle) * (ZODIAC_RING_RADIUS_AU * 1.14),
+    });
+
+    ctx.font = `${symbolPx}px 'JetBrains Mono', ui-monospace, monospace`;
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(165,243,252,0.85)";
+    ctx.fillText(sign.symbol, labelPoint.x, labelPoint.y);
+    ctx.font = `${namePx}px 'JetBrains Mono', ui-monospace, monospace`;
+    ctx.fillStyle = "rgba(148,212,255,0.85)";
+    ctx.fillText(sign.name.toUpperCase(), namePoint.x, namePoint.y);
+  }
+
+  for (let deg = 0; deg < 360; deg += 10) {
+    const rad = deg * DEG2RAD;
+    const isMajor = deg % 30 === 0;
+    const innerFactor = isMajor ? 0.92 : 0.97;
+    const outerFactor = 1.0;
+    const innerPoint = worldToScreen({
+      x: Math.cos(rad) * (ZODIAC_RING_RADIUS_AU * innerFactor),
+      y: Math.sin(rad) * (ZODIAC_RING_RADIUS_AU * innerFactor),
+    });
+    const outerPoint = worldToScreen({
+      x: Math.cos(rad) * (ZODIAC_RING_RADIUS_AU * outerFactor),
+      y: Math.sin(rad) * (ZODIAC_RING_RADIUS_AU * outerFactor),
+    });
+    ctx.beginPath();
+    ctx.strokeStyle = isMajor ? "rgba(56,189,248,0.35)" : "rgba(56,189,248,0.18)";
+    ctx.lineWidth = isMajor ? clamp(scale * 0.35, 0.5, 1.4) : clamp(scale * 0.25, 0.4, 1.0);
+    ctx.moveTo(innerPoint.x, innerPoint.y);
+    ctx.lineTo(outerPoint.x, outerPoint.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawEclipticGrid(
+  ctx: CanvasRenderingContext2D,
+  worldToScreen: (point: Vec2) => Vec2,
+  scale: number
+) {
+  const center = worldToScreen({ x: 0, y: 0 });
+  const outerRadius = ZODIAC_RING_RADIUS_AU * 1.05;
+  const innerRadius = 2.5;
+  ctx.save();
+  ctx.strokeStyle = "rgba(125,211,252,0.18)";
+  ctx.lineWidth = clamp(scale * 0.25, 0.3, 1.0);
+
+  for (let deg = 0; deg < 360; deg += 30) {
+    const rad = deg * DEG2RAD;
+    const innerPoint = worldToScreen({
+      x: Math.cos(rad) * innerRadius,
+      y: Math.sin(rad) * innerRadius,
+    });
+    const outerPoint = worldToScreen({
+      x: Math.cos(rad) * outerRadius,
+      y: Math.sin(rad) * outerRadius,
+    });
+    ctx.beginPath();
+    ctx.moveTo(innerPoint.x, innerPoint.y);
+    ctx.lineTo(outerPoint.x, outerPoint.y);
+    ctx.stroke();
+  }
+
+  const latitudes = [-30, -15, 15, 30];
+  latitudes.forEach((lat) => {
+    const beta = lat * DEG2RAD;
+    const radiusAU = outerRadius * Math.cos(beta);
+    const edge = worldToScreen({ x: radiusAU, y: 0 });
+    const radiusPx = Math.hypot(edge.x - center.x, edge.y - center.y);
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radiusPx, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+
   ctx.restore();
 }
 
@@ -421,13 +609,23 @@ function drawPlanets(
   ctx.font = `${fontPx}px 'JetBrains Mono', ui-monospace, monospace`;
   ctx.fillStyle = "#e2e8f0";
 
+  let earthPosition: { world: Vec2; screen: Vec2 } | null = null;
+
   PLANETS.forEach((planet) => {
     const pos = keplerPosition(planet, time.getTime());
     const screen = worldToScreen(pos);
     drawPlanetGlyph(ctx, screen, radiusPx, planet);
     ctx.fillStyle = "#e2e8f0";
     ctx.fillText(planet.name, screen.x + radiusPx + 6, screen.y);
+
+    if (planet.name === "Earth") {
+      earthPosition = { world: pos, screen };
+    }
   });
+
+  if (earthPosition) {
+    drawMoonSystem(ctx, earthPosition, time, worldToScreen, radiusPx);
+  }
 }
 
 function drawPlanetGlyph(ctx: CanvasRenderingContext2D, center: Vec2, radius: number, planet: Planet) {
@@ -479,6 +677,60 @@ function drawPlanetGlyph(ctx: CanvasRenderingContext2D, center: Vec2, radius: nu
       ctx.fill();
     });
   }
+}
+
+function drawMoonSystem(
+  ctx: CanvasRenderingContext2D,
+  earthPosition: { world: Vec2; screen: Vec2 },
+  time: Date,
+  worldToScreen: (point: Vec2) => Vec2,
+  planetRadius: number
+) {
+  const earthScreen = earthPosition.screen;
+  const moonRelative = keplerPosition(MOON, time.getTime());
+  const moonWorld = { x: earthPosition.world.x + moonRelative.x, y: earthPosition.world.y + moonRelative.y };
+  const moonRawScreen = worldToScreen(moonWorld);
+  const dx = moonRawScreen.x - earthScreen.x;
+  const dy = moonRawScreen.y - earthScreen.y;
+  const rWorldPx = Math.hypot(dx, dy);
+  const theta = Math.atan2(moonWorld.y - earthPosition.world.y, moonWorld.x - earthPosition.world.x);
+  const rTarget = clamp(rWorldPx, MOON_VIS_MIN_PX, MOON_VIS_MAX_PX);
+  const weight = smoothClampWeight(rWorldPx, MOON_VIS_MIN_PX, MOON_VIS_MAX_PX, LERP_SOFTEN_PX);
+  const rVisual = lerp(rWorldPx, rTarget, weight);
+  const moonScreen = {
+    x: earthScreen.x + rVisual * Math.cos(theta),
+    y: earthScreen.y + rVisual * Math.sin(theta),
+  };
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(earthScreen.x, earthScreen.y, rVisual, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(148,163,184,0.25)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+
+  const moonRadius = clamp(planetRadius * 0.55, ICON_MIN * 0.45, ICON_MAX * 0.45);
+  drawPlanetGlyph(ctx, moonScreen, moonRadius, MOON);
+  ctx.fillStyle = "#e2e8f0";
+  ctx.fillText(MOON.name, moonScreen.x + moonRadius + 4, moonScreen.y);
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t;
+}
+
+function smoothClampWeight(r: number, lo: number, hi: number, feather: number) {
+  if (feather <= 0) return r < lo || r > hi ? 1 : 0;
+  if (r < lo) {
+    const t = (lo - r) / feather;
+    return Math.min(1, (t * t) / (1 + t * t));
+  }
+  if (r > hi) {
+    const t = (r - hi) / feather;
+    return Math.min(1, (t * t) / (1 + t * t));
+  }
+  return 0;
 }
 
 function lighten(hex: string, factor: number) {

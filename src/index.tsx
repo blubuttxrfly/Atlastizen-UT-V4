@@ -81,6 +81,7 @@ type TimeZoneInfo = {
 };
 
 type CompassStatus = "idle" | "active" | "denied" | "unsupported";
+type UITheme = "normal" | "retro";
 
 const FALLBACK_PLACE_LABEL = "Charlotte, NC";
 const PLACE_CACHE_PREFIX = "aut-place:";
@@ -90,6 +91,7 @@ const RING_INNER_RADIUS = 22;
 const POINTER_RADIUS = 58;
 const LABEL_RADIUS = (RING_OUTER_RADIUS + RING_INNER_RADIUS) / 2;
 const COMPASS_CARDINALS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const;
+const UI_THEME_STORAGE_KEY = "aut-ui-theme";
 
 function roundedCoord(value: number, precision = COORD_PRECISION): number {
   const factor = 10 ** precision;
@@ -115,6 +117,25 @@ function writeSession(key: string, value: string): void {
   if (typeof window === "undefined") return;
   try {
     window.sessionStorage.setItem(key, value);
+  } catch {
+    // ignore
+  }
+}
+
+function readStoredTheme(): UITheme {
+  if (typeof window === "undefined") return "normal";
+  try {
+    const stored = window.localStorage.getItem(UI_THEME_STORAGE_KEY);
+    return stored === "retro" || stored === "normal" ? stored : "normal";
+  } catch {
+    return "normal";
+  }
+}
+
+function persistTheme(theme: UITheme): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(UI_THEME_STORAGE_KEY, theme);
   } catch {
     // ignore
   }
@@ -900,6 +921,9 @@ export default function AUTClock() {
   const [compassPitch, setCompassPitch] = useState<number | null>(null);
   const [compassRoll, setCompassRoll] = useState<number | null>(null);
   const [compassAbsolute, setCompassAbsolute] = useState(false);
+  const [uiTheme, setUiTheme] = useState<UITheme>(() => readStoredTheme());
+  const themeSelectId = useId();
+  const isRetroTheme = uiTheme === "retro";
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
@@ -924,6 +948,13 @@ export default function AUTClock() {
       timeZoneControllerRef.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    persistTheme(uiTheme);
+    if (typeof document !== "undefined" && document.body) {
+      document.body.dataset.autTheme = uiTheme;
+    }
+  }, [uiTheme]);
 
   const requestCompass = useCallback(async () => {
     if (typeof window === "undefined") return;
@@ -1413,10 +1444,18 @@ export default function AUTClock() {
 
   return (
     <div
-      className="min-h-screen w-full bg-zinc-900 text-zinc-100 flex items-center justify-center p-6"
-      style={{ fontFamily: "'Alice', ui-sans-serif" }}
+      className={`min-h-screen w-full text-zinc-100 flex items-center justify-center p-6 ${
+        isRetroTheme ? "retro-theme" : "bg-zinc-900"
+      }`}
+      style={{
+        fontFamily: isRetroTheme ? "'JetBrains Mono', ui-monospace, monospace" : "'Alice', ui-sans-serif",
+      }}
     >
-      <div className="w-full max-w-4xl rounded-2xl shadow-xl bg-zinc-800 p-6 md:p-8 space-y-6">
+      <div
+        className={`w-full max-w-4xl rounded-2xl shadow-xl p-6 md:p-8 space-y-6 ${
+          isRetroTheme ? "retro-panel" : "bg-zinc-800"
+        }`}
+      >
         <header className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
           <div>
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
@@ -1488,18 +1527,43 @@ export default function AUTClock() {
                 {data.autClock}
               </div>
             </div>
-            <div className="text-right">
-              <div className="text-sm text-zinc-300">Segment</div>
-              <div className="text-lg font-medium">{data.segmentLabel}</div>
-              <div className="text-xs text-zinc-400">Mode: {data.mode}</div>
-              <div className="text-sm text-zinc-400">{pct}% through this segment</div>
+            <div className="flex flex-col items-end gap-2 text-right">
+              <div>
+                <div className="text-sm text-zinc-300">Segment</div>
+                <div className="text-lg font-medium">{data.segmentLabel}</div>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <label
+                  htmlFor={themeSelectId}
+                  className={`theme-select-label text-[0.65rem] uppercase tracking-wide ${
+                    isRetroTheme ? "retro-muted" : "text-zinc-400"
+                  }`}
+                >
+                  UI Mode
+                </label>
+                <select
+                  id={themeSelectId}
+                  className="theme-select rounded-lg border border-zinc-600 bg-zinc-800 px-2 py-1 text-xs uppercase tracking-wide text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  value={uiTheme}
+                  onChange={(event) => setUiTheme(event.target.value as UITheme)}
+                >
+                  <option value="normal">Normal</option>
+                  <option value="retro">Retro Sci-Fi</option>
+                </select>
+              </div>
+              <div className={`text-xs ${isRetroTheme ? "retro-subtext" : "text-zinc-500"}`}>
+                Solar mode: {data.mode}
+              </div>
+              <div className={`text-sm ${isRetroTheme ? "retro-muted" : "text-zinc-400"}`}>
+                {pct}% through this segment
+              </div>
             </div>
           </div>
 
           <div className="mt-6">
-            <div className="w-full h-3 bg-zinc-700 rounded-full overflow-hidden">
+            <div className="progress-track w-full h-3 bg-zinc-700 rounded-full overflow-hidden">
               <div
-                className="h-3 bg-zinc-100/90"
+                className="progress-fill h-3 bg-zinc-100/90"
                 style={{ width: `${pct}%` }}
                 aria-label="Progress within current segment"
               />
@@ -1862,17 +1926,6 @@ export default function AUTClock() {
           )}
         </section>
 
-        {/* Heartlight System Map */}
-        <section className="rounded-2xl border border-sky-500/30 bg-slate-900/60 p-6 space-y-4">
-          <div className="flex flex-col gap-1">
-            <div className="text-sm uppercase tracking-wide text-sky-200/80">
-              Heartlight System Map
-            </div>
-            <p className="text-sm text-slate-300">Pan, zoom, and sweep through time to watch each planet trace its Keplerian ellipse.</p>
-          </div>
-          <AtlasCometMap />
-        </section>
-
         {/* Gyro Compass */}
         <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -1992,6 +2045,17 @@ export default function AUTClock() {
               </p>
             </div>
           </div>
+        </section>
+
+        {/* Heartlight System Map */}
+        <section className="rounded-2xl border border-sky-500/30 bg-slate-900/60 p-6 space-y-4">
+          <div className="flex flex-col gap-1">
+            <div className="text-sm uppercase tracking-wide text-sky-200/80">
+              Heartlight System Map
+            </div>
+            <p className="text-sm text-slate-300">Pan, zoom, and sweep through time to watch each planet trace its Keplerian ellipse.</p>
+          </div>
+          <AtlasCometMap />
         </section>
 
         {/* Ray Dial */}

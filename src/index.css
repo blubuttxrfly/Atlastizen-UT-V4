@@ -22,3 +22,134 @@ input,
 textarea {
   font: inherit;
 }
+
+/* Retro Sci-Fi theme */
+.retro-theme {
+  background: radial-gradient(ellipse at top, rgba(96, 255, 176, 0.08), transparent 65%) #020b04;
+  color: #a8ffbf;
+}
+
+.retro-theme .retro-panel {
+  background: #041609;
+  border: 2px solid rgba(96, 255, 176, 0.35);
+  box-shadow: inset 0 0 28px rgba(10, 74, 36, 0.78), 0 0 45px rgba(24, 255, 140, 0.12);
+  color: inherit;
+}
+
+.retro-theme .retro-panel h1,
+.retro-theme .retro-panel h2,
+.retro-theme .retro-panel h3,
+.retro-theme .retro-panel h4 {
+  text-shadow: 0 0 10px rgba(96, 255, 176, 0.35);
+}
+
+.retro-theme .retro-panel section.border {
+  background-color: rgba(3, 28, 14, 0.94) !important;
+  border-color: rgba(96, 255, 176, 0.35) !important;
+  box-shadow: inset 0 0 0 1px rgba(96, 255, 176, 0.12);
+}
+
+.retro-theme .retro-panel .rounded-xl {
+  background-color: rgba(4, 32, 16, 0.92) !important;
+  border-color: rgba(96, 255, 176, 0.28) !important;
+}
+
+.retro-theme .retro-muted {
+  color: rgba(170, 255, 200, 0.7) !important;
+}
+
+.retro-theme .retro-subtext {
+  color: rgba(136, 255, 184, 0.55) !important;
+}
+
+.retro-theme .theme-select-label {
+  color: rgba(160, 255, 200, 0.68) !important;
+  letter-spacing: 0.12em;
+}
+
+.retro-theme .theme-select {
+  background-color: rgba(2, 38, 12, 0.92) !important;
+  border: 1px solid rgba(96, 255, 176, 0.5) !important;
+  color: #c0ffd3 !important;
+  box-shadow: 0 0 14px rgba(96, 255, 176, 0.25);
+}
+
+.retro-theme .theme-select:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(126, 255, 196, 0.35);
+}
+
+.retro-theme .retro-panel button {
+  background-color: rgba(3, 38, 18, 0.9) !important;
+  border: 1px solid rgba(96, 255, 176, 0.4) !important;
+  color: #c0ffd3 !important;
+  text-shadow: 0 0 6px rgba(96, 255, 176, 0.5);
+}
+
+.retro-theme .retro-panel button:hover {
+  background-color: rgba(6, 56, 26, 0.95) !important;
+}
+
+.retro-theme .retro-panel input,
+.retro-theme .retro-panel select,
+.retro-theme .retro-panel textarea {
+  background-color: rgba(2, 26, 12, 0.9) !important;
+  border: 1px solid rgba(96, 255, 176, 0.4) !important;
+  color: #c0ffd3 !important;
+}
+
+.retro-theme .retro-panel input[type="checkbox"] {
+  accent-color: rgba(96, 255, 176, 0.8);
+  background-color: rgba(2, 26, 12, 0.9);
+}
+
+.retro-theme .retro-panel input::placeholder,
+.retro-theme .retro-panel textarea::placeholder {
+  color: rgba(150, 255, 200, 0.45);
+}
+
+.retro-theme .retro-panel .progress-track {
+  background-color: rgba(2, 26, 14, 0.82) !important;
+  border: 1px solid rgba(96, 255, 176, 0.25);
+}
+
+.retro-theme .retro-panel .progress-fill {
+  background: linear-gradient(90deg, rgba(96, 255, 176, 0.92), rgba(182, 255, 210, 0.65)) !important;
+}
+
+.retro-theme .retro-panel .text-zinc-300,
+.retro-theme .retro-panel .text-zinc-400,
+.retro-theme .retro-panel .text-zinc-500,
+.retro-theme .retro-panel .text-slate-300,
+.retro-theme .retro-panel .text-sky-200\/80,
+.retro-theme .retro-panel .text-amber-100,
+.retro-theme .retro-panel .text-amber-200\/70,
+.retro-theme .retro-panel .text-amber-300,
+.retro-theme .retro-panel .text-emerald-300,
+.retro-theme .retro-panel .text-emerald-200,
+.retro-theme .retro-panel .text-emerald-100 {
+  color: #b8ffd1 !important;
+}
+
+.retro-theme .retro-panel .border-zinc-700,
+.retro-theme .retro-panel .border-amber-500\/30,
+.retro-theme .retro-panel .border-sky-500\/20,
+.retro-theme .retro-panel .border-sky-500\/30,
+.retro-theme .retro-panel .border-emerald-500\/30,
+.retro-theme .retro-panel .border-slate-700 {
+  border-color: rgba(96, 255, 176, 0.35) !important;
+}
+
+.retro-theme .retro-panel .bg-gradient-to-br,
+.retro-theme .retro-panel .bg-zinc-900\/40,
+.retro-theme .retro-panel .bg-zinc-900\/30,
+.retro-theme .retro-panel .bg-zinc-900\/50,
+.retro-theme .retro-panel .bg-zinc-800,
+.retro-theme .retro-panel .bg-zinc-700,
+.retro-theme .retro-panel .bg-slate-900\/60,
+.retro-theme .retro-panel .bg-amber-500\/10,
+.retro-theme .retro-panel .bg-sky-500\/20,
+.retro-theme .retro-panel .bg-amber-500\/30 {
+  background-color: rgba(3, 28, 14, 0.94) !important;
+  background-image: none !important;
+}
