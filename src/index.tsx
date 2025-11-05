@@ -82,6 +82,7 @@ type TimeZoneInfo = {
 
 type CompassStatus = "idle" | "active" | "denied" | "unsupported";
 type UITheme = "normal" | "retro";
+type PanelId = "clock" | "sol" | "luna" | "compass" | "heartlight" | "ray" | "postal";
 
 const FALLBACK_PLACE_LABEL = "Charlotte, NC";
 const PLACE_CACHE_PREFIX = "aut-place:";
@@ -92,6 +93,15 @@ const POINTER_RADIUS = 58;
 const LABEL_RADIUS = (RING_OUTER_RADIUS + RING_INNER_RADIUS) / 2;
 const COMPASS_CARDINALS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const;
 const UI_THEME_STORAGE_KEY = "aut-ui-theme";
+const PANEL_OPTIONS: Array<{ id: PanelId; label: string }> = [
+  { id: "clock", label: "AUT Clock" },
+  { id: "sol", label: "Sol Panel" },
+  { id: "luna", label: "Luna Panel" },
+  { id: "compass", label: "Gyro Compass" },
+  { id: "heartlight", label: "Heartlight System Map" },
+  { id: "ray", label: "Ray Dial" },
+  { id: "postal", label: "Postal Lookup" },
+];
 
 function roundedCoord(value: number, precision = COORD_PRECISION): number {
   const factor = 10 ** precision;
@@ -922,6 +932,8 @@ export default function AUTClock() {
   const [compassRoll, setCompassRoll] = useState<number | null>(null);
   const [compassAbsolute, setCompassAbsolute] = useState(false);
   const [uiTheme, setUiTheme] = useState<UITheme>(() => readStoredTheme());
+  const [activePanel, setActivePanel] = useState<PanelId>("clock");
+  const panelSelectId = useId();
   const themeSelectId = useId();
   const isRetroTheme = uiTheme === "retro";
 
@@ -1456,7 +1468,7 @@ export default function AUTClock() {
           isRetroTheme ? "retro-panel" : "bg-zinc-800"
         }`}
       >
-        <header className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+        <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">
               Atlastizen Universal Time
@@ -1465,85 +1477,28 @@ export default function AUTClock() {
               Sunrise → 00:00 AUT • Sunset → 12:00 AUT • Next Sunrise → 24:00 AUT
             </p>
           </div>
-          <div className="text-right">
-            <div className="text-sm uppercase text-zinc-400">Local Now</div>
-            <div className="text-xl md:text-2xl font-medium">{formatLongTime(now)}</div>
-          </div>
-        </header>
-
-        {/* Location Controls */}
-        <section className="flex flex-col gap-2">
-          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-            <div>
-              <div className="text-sm text-zinc-400">Location</div>
-              <div className="text-lg font-medium">{locationPrimary}</div>
-            </div>
-            <button
-              className="self-start rounded-xl bg-zinc-700 px-3 py-2 shadow transition hover:bg-zinc-600 md:self-center"
-              onClick={() => {
-                if (navigator.geolocation) {
-                  navigator.geolocation.getCurrentPosition(
-                    (pos: GeolocationPosition) =>
-                      setCoords({
-                        lat: pos.coords.latitude,
-                        lon: pos.coords.longitude,
-                      }),
-                    () => setCoords(fallback),
-                    { enableHighAccuracy: true, maximumAge: 60_000, timeout: 10_000 }
-                  );
-                }
-              }}
-            >
-              Recenter
-            </button>
-          </div>
-          <div className="text-sm text-zinc-400">
-            lat {coords.lat.toFixed(4)}°, lon {coords.lon.toFixed(4)}°
-          </div>
-          <div className={`text-xs ${timeZoneTone}`}>{timeZoneLine}</div>
-          {locationHint ? (
-            <div className={`flex items-center gap-2 text-xs ${locationHintTone}`}>
-              <span>{locationHint}</span>
-              {status === "granted" && placeStatus === "error" ? (
-                <button
-                  className="rounded-lg px-2 py-1 text-xs text-emerald-300 transition hover:text-emerald-200"
-                  onClick={() => retry()}
+          <div className="flex flex-col gap-4 md:items-end">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end sm:gap-4">
+              <div className="flex flex-col gap-1 text-xs uppercase tracking-wide text-zinc-400">
+                <label htmlFor={panelSelectId}>Dashboard Panel</label>
+                <select
+                  id={panelSelectId}
+                  className="rounded-lg border border-zinc-600 bg-zinc-800 px-2 py-1 text-xs uppercase tracking-wide text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  value={activePanel}
+                  onChange={(event) => setActivePanel(event.target.value as PanelId)}
                 >
-                  Try again
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-        </section>
-
-        {/* AUT Display */}
-        <section className="rounded-2xl p-6 bg-gradient-to-br from-indigo-800/40 via-cyan-700/30 to-emerald-700/20 border border-zinc-700 shadow-inner">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div>
-              <div className="text-sm uppercase tracking-wide text-zinc-300">
-                AUT (Alastizen Universal Time)
+                  {PANEL_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
               </div>
-              <div className="text-5xl md:text-6xl font-bold tabular-nums">
-                {data.autClock}
-              </div>
-            </div>
-            <div className="flex flex-col items-end gap-2 text-right">
-              <div>
-                <div className="text-sm text-zinc-300">Segment</div>
-                <div className="text-lg font-medium">{data.segmentLabel}</div>
-              </div>
-              <div className="flex flex-col items-end gap-1">
-                <label
-                  htmlFor={themeSelectId}
-                  className={`theme-select-label text-[0.65rem] uppercase tracking-wide ${
-                    isRetroTheme ? "retro-muted" : "text-zinc-400"
-                  }`}
-                >
-                  UI Mode
-                </label>
+              <div className="flex flex-col gap-1 text-xs uppercase tracking-wide text-zinc-400">
+                <label htmlFor={themeSelectId}>UI Mode</label>
                 <select
                   id={themeSelectId}
-                  className="theme-select rounded-lg border border-zinc-600 bg-zinc-800 px-2 py-1 text-xs uppercase tracking-wide text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className="rounded-lg border border-zinc-600 bg-zinc-800 px-2 py-1 text-xs uppercase tracking-wide text-zinc-200 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                   value={uiTheme}
                   onChange={(event) => setUiTheme(event.target.value as UITheme)}
                 >
@@ -1551,50 +1506,123 @@ export default function AUTClock() {
                   <option value="retro">Retro Sci-Fi</option>
                 </select>
               </div>
-              <div className={`text-xs ${isRetroTheme ? "retro-subtext" : "text-zinc-500"}`}>
-                Solar mode: {data.mode}
+            </div>
+            <div className="text-right">
+              <div className="text-sm uppercase text-zinc-400">Local Now</div>
+              <div className="text-xl md:text-2xl font-medium">{formatLongTime(now)}</div>
+            </div>
+          </div>
+        </header>
+
+        {["clock", "sol", "luna", "ray", "postal"].includes(activePanel) && (
+          <section className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="text-sm text-zinc-400">Location</div>
+                <div className="text-lg font-medium">{locationPrimary}</div>
               </div>
-              <div className={`text-sm ${isRetroTheme ? "retro-muted" : "text-zinc-400"}`}>
-                {pct}% through this segment
+              <button
+                className="self-start rounded-xl bg-zinc-700 px-3 py-2 shadow transition hover:bg-zinc-600 md:self-center"
+                onClick={() => {
+                  if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                      (pos: GeolocationPosition) =>
+                        setCoords({
+                          lat: pos.coords.latitude,
+                          lon: pos.coords.longitude,
+                        }),
+                      () => setCoords(fallback),
+                      { enableHighAccuracy: true, maximumAge: 60_000, timeout: 10_000 }
+                    );
+                  }
+                }}
+              >
+                Recenter
+              </button>
+            </div>
+            <div className="text-sm text-zinc-400">
+              lat {coords.lat.toFixed(4)}°, lon {coords.lon.toFixed(4)}°
+            </div>
+            <div className={`text-xs ${timeZoneTone}`}>{timeZoneLine}</div>
+            {locationHint ? (
+              <div className={`flex items-center gap-2 text-xs ${locationHintTone}`}>
+                <span>{locationHint}</span>
+                {status === "granted" && placeStatus === "error" ? (
+                  <button
+                    className="rounded-lg px-2 py-1 text-xs text-emerald-300 transition hover:text-emerald-200"
+                    onClick={() => retry()}
+                  >
+                    Try again
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+        )}
+
+        {activePanel === "clock" && (
+          <section className="rounded-2xl border border-zinc-700 bg-gradient-to-br from-indigo-800/40 via-cyan-700/30 to-emerald-700/20 p-6 shadow-inner">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="text-sm uppercase tracking-wide text-zinc-300">
+                  AUT (Alastizen Universal Time)
+                </div>
+                <div className="text-5xl md:text-6xl font-bold tabular-nums">
+                  {data.autClock}
+                </div>
+              </div>
+              <div className="flex flex-col items-end gap-2 text-right">
+                <div>
+                  <div className="text-sm text-zinc-300">Segment</div>
+                  <div className="text-lg font-medium">{data.segmentLabel}</div>
+                </div>
+                <div className={`text-xs ${isRetroTheme ? "retro-subtext" : "text-zinc-500"}`}>
+                  Solar mode: {data.mode}
+                </div>
+                <div className={`text-sm ${isRetroTheme ? "retro-muted" : "text-zinc-400"}`}>
+                  {pct}% through this segment
+                </div>
               </div>
             </div>
-          </div>
 
-          <div className="mt-6">
-            <div className="progress-track w-full h-3 bg-zinc-700 rounded-full overflow-hidden">
-              <div
-                className="progress-fill h-3 bg-zinc-100/90"
-                style={{ width: `${pct}%` }}
-                aria-label="Progress within current segment"
-              />
+            <div className="mt-6">
+              <div className="progress-track h-3 w-full rounded-full bg-zinc-700">
+                <div
+                  className="progress-fill h-3 bg-zinc-100/90"
+                  style={{ width: `${pct}%` }}
+                  aria-label="Progress within current segment"
+                />
+              </div>
             </div>
-          </div>
 
-          <div className="grid md:grid-cols-3 gap-4 mt-6">
-            <div className="rounded-xl bg-zinc-900/40 border border-zinc-700 p-4">
-              <div className="text-sm text-zinc-400">Sunrise (00:00 AUT)</div>
-              <div className="text-xl font-semibold">{formatShortTime(data.sunriseLocal)}</div>
+            <div className="mt-6 grid gap-4 md:grid-cols-3">
+              <div className="rounded-xl border border-zinc-700 bg-zinc-900/40 p-4">
+                <div className="text-sm text-zinc-400">Sunrise (00:00 AUT)</div>
+                <div className="text-xl font-semibold">{formatShortTime(data.sunriseLocal)}</div>
+              </div>
+              <div className="rounded-xl border border-zinc-700 bg-zinc-900/40 p-4">
+                <div className="text-sm text-zinc-400">Solar Sunset (12:00 AUT)</div>
+                <div className="text-xl font-semibold">{formatShortTime(data.sunsetLocal)}</div>
+              </div>
+              <div className="rounded-xl border border-zinc-700 bg-zinc-900/40 p-4">
+                <div className="text-sm text-zinc-400">Next Sunrise (24:00 AUT)</div>
+                <div className="text-xl font-semibold">{formatShortTime(data.nextSunriseLocal)}</div>
+              </div>
             </div>
-            <div className="rounded-xl bg-zinc-900/40 border border-zinc-700 p-4">
-              <div className="text-sm text-zinc-400">Solar Sunset (12:00 AUT)</div>
-              <div className="text-xl font-semibold">{formatShortTime(data.sunsetLocal)}</div>
-            </div>
-            <div className="rounded-xl bg-zinc-900/40 border border-zinc-700 p-4">
-              <div className="text-sm text-zinc-400">Next Sunrise (24:00 AUT)</div>
-              <div className="text-xl font-semibold">{formatShortTime(data.nextSunriseLocal)}</div>
-            </div>
-          </div>
 
-          <div className="grid md:grid-cols-2 gap-4 mt-4 text-sm text-zinc-300">
-            <div className="rounded-xl bg-zinc-900/30 border border-zinc-700 p-4">
-              <div>Day length: {Math.round(data.dayLenMin)} min</div>
+            <div className="mt-4 grid gap-4 text-sm text-zinc-300 md:grid-cols-2">
+              <div className="rounded-xl border border-zinc-700 bg-zinc-900/30 p-4">
+                <div>Day length: {Math.round(data.dayLenMin)} min</div>
+              </div>
+              <div className="rounded-xl border border-zinc-700 bg-zinc-900/30 p-4">
+                <div>Night length: {Math.round(data.nightLenMin)} min</div>
+              </div>
             </div>
-            <div className="rounded-xl bg-zinc-900/30 border border-zinc-700 p-4">
-              <div>Night length: {Math.round(data.nightLenMin)} min</div>
-            </div>
-          </div>
-        </section>
+          </section>
+        )}
 
+        {activePanel === "sol" && (
+          <>
         {/* Sol Panel */}
         <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -1750,7 +1778,11 @@ export default function AUTClock() {
             </div>
           )}
         </section>
+          </>
+        )}
 
+        {activePanel === "luna" && (
+          <>
         {/* Luna Panel */}
         <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -1925,7 +1957,11 @@ export default function AUTClock() {
             </div>
           )}
         </section>
+          </>
+        )}
 
+        {activePanel === "compass" && (
+          <>
         {/* Gyro Compass */}
         <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -2046,7 +2082,11 @@ export default function AUTClock() {
             </div>
           </div>
         </section>
+          </>
+        )}
 
+        {activePanel === "heartlight" && (
+          <>
         {/* Heartlight System Map */}
         <section className="rounded-2xl border border-sky-500/30 bg-slate-900/60 p-6 space-y-4">
           <div className="flex flex-col gap-1">
@@ -2057,7 +2097,11 @@ export default function AUTClock() {
           </div>
           <AtlasCometMap />
         </section>
+          </>
+        )}
 
+        {activePanel === "ray" && (
+          <>
         {/* Ray Dial */}
         <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-6">
           <div className={rayHeaderClass}>
@@ -2142,7 +2186,11 @@ export default function AUTClock() {
           </div>
 
         </section>
+          </>
+        )}
 
+        {activePanel === "postal" && (
+          <>
         {/* Postal Lookup */}
         <section className="rounded-2xl p-6 bg-zinc-900/40 border border-zinc-700 space-y-4">
           <div className="text-sm uppercase text-zinc-400">Postal / ZIP Lookup</div>
@@ -2187,6 +2235,8 @@ export default function AUTClock() {
             Powered by Zippopotam.us — coordinates derived from the first matching place.
           </p>
         </section>
+          </>
+        )}
 
         <footer className="text-center text-xs text-zinc-500 mt-2">
           ✨ Atlas Island | AUT Live Clock | Ray‑aligned circadian time ✨

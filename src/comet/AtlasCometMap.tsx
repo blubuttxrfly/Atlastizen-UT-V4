@@ -1,5 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as Astronomy from "astronomy-engine";
 type Vec2 = { x: number; y: number };
+
+type ViewMode = "heliocentric" | "geocentric";
+
+type BodyName =
+  | "Sun"
+  | "Moon"
+  | "Mercury"
+  | "Venus"
+  | "Earth"
+  | "Mars"
+  | "Jupiter"
+  | "Saturn"
+  | "Uranus"
+  | "Neptune"
+  | "Pluto";
 
 type Planet = {
   name: string;
@@ -14,8 +30,11 @@ type Planet = {
 };
 
 type OverlayOptions = {
+  viewMode: ViewMode;
   showZodiac: boolean;
   showEclipticGrid: boolean;
+  showMoon: boolean;
+  scaleLabels: boolean;
 };
 
 const PLANETS: Planet[] = [
@@ -71,30 +90,91 @@ const ZODIAC_SIGNS = [
   { name: "Pisces", symbol: "♓︎" },
 ];
 const ZODIAC_RING_RADIUS_AU = 44;
+const BODIES: BodyName[] = ["Sun", "Moon", "Mercury", "Venus", "Earth", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune", "Pluto"];
+const GEO_BASE_RADIUS_AU = ZODIAC_RING_RADIUS_AU * 0.97;
+
+type Placement = {
+  body: BodyName;
+  lon: number;
+  lat: number;
+  dist: number;
+  vector: Astronomy.Vector;
+  world: Vec2;
+  mode: ViewMode;
+};
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function normalizeAngle(angle: number) {
-  return ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+function normalizeDegrees(degrees: number) {
+  const mod = degrees % 360;
+  return mod < 0 ? mod + 360 : mod;
 }
 
-function keplerPosition(planet: Planet, timeMs: number): Vec2 {
-  const periodMs = planet.periodDays * 86400000;
-  if (!Number.isFinite(periodMs) || periodMs === 0) {
-    return { x: planet.a, y: 0 };
+function asTime(date: Date) {
+  return Astronomy.MakeTime(date);
+}
+
+function toEcliptic(vector: Astronomy.Vector) {
+  const equatorial = Astronomy.EquatorFromVector(vector);
+  const ecliptic = Astronomy.Ecliptic(equatorial.vec);
+  return {
+    lon: normalizeDegrees(ecliptic.elon),
+    lat: ecliptic.elat,
+    dist: equatorial.dist,
+    vector,
+  };
+}
+
+function heliocentricPlacement(body: BodyName, when: Date): Placement {
+  const time = asTime(when);
+  const vector = Astronomy.HelioVector(body as Astronomy.Body, time);
+  const { lon, lat, dist } = toEcliptic(vector);
+  const rad = lon * DEG2RAD;
+  const world: Vec2 = {
+    x: dist * Math.cos(rad),
+    y: dist * Math.sin(rad),
+  };
+  return { body, lon, lat, dist, vector, world, mode: "heliocentric" };
+}
+
+function geocentricWorld(lon: number, lat: number): Vec2 {
+  const rad = lon * DEG2RAD;
+  const latFactor = clamp(lat / 40, -1.5, 1.5);
+  const radius = GEO_BASE_RADIUS_AU * (1 + latFactor * 0.12);
+  return {
+    x: radius * Math.cos(rad),
+    y: radius * Math.sin(rad),
+  };
+}
+
+function geocentricPlacement(body: BodyName, when: Date): Placement {
+  if (body === "Earth") {
+    const time = asTime(when);
+    const vector = new Astronomy.Vector(0, 0, 0, time);
+    return {
+      body,
+      lon: 0,
+      lat: 0,
+      dist: 0,
+      vector,
+      world: { x: 0, y: 0 },
+      mode: "geocentric",
+    };
   }
-  const meanAnomaly = (normalizeAngle((timeMs % periodMs) / periodMs * Math.PI * 2));
-  let eccentricAnomaly = meanAnomaly;
-  for (let i = 0; i < 5; i += 1) {
-    eccentricAnomaly = eccentricAnomaly - (eccentricAnomaly - planet.e * Math.sin(eccentricAnomaly) - meanAnomaly) / (1 - planet.e * Math.cos(eccentricAnomaly));
+  const time = asTime(when);
+  const vector = Astronomy.GeoVector(body as Astronomy.Body, time, true);
+  const { lon, lat, dist } = toEcliptic(vector);
+  const world = geocentricWorld(lon, lat);
+  return { body, lon, lat, dist, vector, world, mode: "geocentric" };
+}
+
+function getPlacements(viewMode: ViewMode, when: Date): Placement[] {
+  if (viewMode === "heliocentric") {
+    return BODIES.map((body) => heliocentricPlacement(body, when));
   }
-  const cosE = Math.cos(eccentricAnomaly);
-  const sinE = Math.sin(eccentricAnomaly);
-  const x = planet.a * (cosE - planet.e);
-  const y = planet.a * Math.sqrt(1 - planet.e * planet.e) * sinE;
-  return { x, y };
+  return BODIES.map((body) => geocentricPlacement(body, when));
 }
 
 function sampleOrbit(planet: Planet): Vec2[] {
@@ -127,11 +207,14 @@ function HeartlightSystemMap() {
   const draggingRef = useRef(false);
   const lastPointerRef = useRef<Vec2>({ x: 0, y: 0 });
 
-  const [displayTime, setDisplayTime] = useState(INITIAL_DATE);
+  const [when, setWhen] = useState(INITIAL_DATE);
   const [running, setRunning] = useState(false);
   const [timeScale] = useState(4);
+  const [viewMode, setViewMode] = useState<ViewMode>("heliocentric");
   const [showZodiac, setShowZodiac] = useState(true);
   const [showEclipticGrid, setShowEclipticGrid] = useState(false);
+  const [showMoon, setShowMoon] = useState(true);
+  const [scaleLabels, setScaleLabels] = useState(true);
 
   const orbitCache = useMemo(() => {
     const cache = new Map<string, Vec2[]>();
@@ -186,7 +269,7 @@ function HeartlightSystemMap() {
 
       accumulator += dt;
       if (accumulator > 0.2) {
-        setDisplayTime(new Date(timeRef.current));
+        setWhen(new Date(timeRef.current));
         accumulator = 0;
       }
 
@@ -209,7 +292,7 @@ function HeartlightSystemMap() {
         new Date(timeRef.current),
         worldToScreen,
         scaleRef.current,
-        { showZodiac, showEclipticGrid }
+        { showZodiac, showEclipticGrid, showMoon, scaleLabels, viewMode }
       );
 
       raf = requestAnimationFrame(render);
@@ -217,7 +300,7 @@ function HeartlightSystemMap() {
 
     raf = requestAnimationFrame(render);
     return () => cancelAnimationFrame(raf);
-  }, [orbitCache, showZodiac, showEclipticGrid]);
+  }, [orbitCache, showZodiac, showEclipticGrid, showMoon, scaleLabels, viewMode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -284,7 +367,7 @@ function HeartlightSystemMap() {
 
   const stepDays = (days: number) => {
     timeRef.current += days * 86400000;
-    setDisplayTime(new Date(timeRef.current));
+    setWhen(new Date(timeRef.current));
   };
 
   const handleDateChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -293,7 +376,7 @@ function HeartlightSystemMap() {
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return;
     timeRef.current = parsed.getTime();
-    setDisplayTime(parsed);
+    setWhen(parsed);
   };
 
   const resetView = () => {
@@ -301,7 +384,13 @@ function HeartlightSystemMap() {
     scaleRef.current = 0.6;
   };
 
-  const formattedDate = useMemo(() => displayTime.toISOString().slice(0, 10), [displayTime]);
+  const formattedDate = useMemo(() => when.toISOString().slice(0, 10), [when]);
+  const heliocentricButtonClass = `px-3 py-1 text-xs font-semibold transition ${
+    viewMode === "heliocentric" ? "bg-sky-500 text-sky-950" : "text-sky-100 hover:bg-sky-500/20"
+  }`;
+  const gaianButtonClass = `px-3 py-1 text-xs font-semibold transition ${
+    viewMode === "geocentric" ? "bg-sky-500 text-sky-950" : "text-sky-100 hover:bg-sky-500/20"
+  }`;
 
   return (
     <div className="flex flex-col gap-4">
@@ -353,7 +442,7 @@ function HeartlightSystemMap() {
             +30 days
           </button>
         </div>
-        <div className="flex items-center gap-3 text-xs uppercase tracking-wide text-sky-200/80">
+        <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-wide text-sky-200/80">
           <label className="flex items-center gap-2">
             Date
             <input
@@ -368,12 +457,33 @@ function HeartlightSystemMap() {
               onClick={() => {
                 const now = new Date();
                 timeRef.current = now.getTime();
-                setDisplayTime(now);
+                setWhen(now);
               }}
             >
               Current Date
             </button>
           </label>
+          <div className="flex items-center gap-2">
+            <span>Perspective</span>
+            <div className="inline-flex overflow-hidden rounded-xl border border-sky-500/60">
+              <button
+                type="button"
+                className={`${heliocentricButtonClass}`}
+                aria-pressed={viewMode === "heliocentric"}
+                onClick={() => setViewMode("heliocentric")}
+              >
+                Solar
+              </button>
+              <button
+                type="button"
+                className={`${gaianButtonClass}`}
+                aria-pressed={viewMode === "geocentric"}
+                onClick={() => setViewMode("geocentric")}
+              >
+                Gaian
+              </button>
+            </div>
+          </div>
           <button
             type="button"
             className="rounded-lg border border-sky-500/60 px-3 py-1 text-xs uppercase tracking-wide text-sky-100 transition hover:bg-sky-500/20"
@@ -400,6 +510,24 @@ function HeartlightSystemMap() {
               onChange={(event) => setShowEclipticGrid(event.target.checked)}
             />
             Ecliptic Grid
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-sky-500 bg-slate-900/80 text-sky-500 focus:ring-sky-400"
+              checked={showMoon}
+              onChange={(event) => setShowMoon(event.target.checked)}
+            />
+            Show Moon
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-sky-500 bg-slate-900/80 text-sky-500 focus:ring-sky-400"
+              checked={scaleLabels}
+              onChange={(event) => setScaleLabels(event.target.checked)}
+            />
+            Labels Scale
           </label>
         </div>
       </div>
@@ -437,6 +565,8 @@ function drawScene(
   ctx.fillStyle = "#030712";
   ctx.fillRect(0, 0, width, height);
 
+  const placements = getPlacements(overlays.viewMode, time);
+
   if (overlays.showEclipticGrid) {
     drawEclipticGrid(ctx, worldToScreen, scale);
   }
@@ -444,21 +574,24 @@ function drawScene(
     drawZodiacRing(ctx, worldToScreen, scale);
   }
 
-  orbitCache.forEach((points) => {
-    if (points.length === 0) return;
-    ctx.beginPath();
-    points.forEach((point, idx) => {
-      const screen = worldToScreen(point);
-      if (idx === 0) ctx.moveTo(screen.x, screen.y);
-      else ctx.lineTo(screen.x, screen.y);
+  if (overlays.viewMode === "heliocentric") {
+    orbitCache.forEach((points) => {
+      if (points.length === 0) return;
+      ctx.beginPath();
+      points.forEach((point, idx) => {
+        const screen = worldToScreen(point);
+        if (idx === 0) ctx.moveTo(screen.x, screen.y);
+        else ctx.lineTo(screen.x, screen.y);
+      });
+      ctx.strokeStyle = "rgba(148,163,184,0.35)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
     });
-    ctx.strokeStyle = "rgba(148,163,184,0.35)";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  });
 
-  drawSun(ctx, worldToScreen, scale);
-  drawPlanets(ctx, time, worldToScreen, scale);
+    drawSun(ctx, worldToScreen, scale);
+  }
+
+  drawBodies(ctx, placements, worldToScreen, scale, overlays);
   ctx.restore();
 }
 
@@ -596,35 +729,58 @@ function drawSun(ctx: CanvasRenderingContext2D, worldToScreen: (point: Vec2) => 
   ctx.shadowBlur = 0;
 }
 
-function drawPlanets(
+function drawSunMarker(ctx: CanvasRenderingContext2D, center: Vec2, scale: number) {
+  const radius = clamp(ICON_BASE * 1.3 * Math.pow(scale, SCALE_EXP * 0.85), ICON_MIN * 0.8, ICON_MAX * 0.8);
+  const gradient = ctx.createRadialGradient(center.x - radius * 0.3, center.y - radius * 0.3, radius * 0.15, center.x, center.y, radius);
+  gradient.addColorStop(0, "#fff7d6");
+  gradient.addColorStop(1, "#f59e0b");
+  ctx.save();
+  ctx.beginPath();
+  ctx.fillStyle = gradient;
+  ctx.shadowColor = "rgba(253, 211, 107, 0.45)";
+  ctx.shadowBlur = 18;
+  ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawBodies(
   ctx: CanvasRenderingContext2D,
-  time: Date,
+  placements: Placement[],
   worldToScreen: (point: Vec2) => Vec2,
-  scale: number
+  scale: number,
+  overlays: OverlayOptions
 ) {
   const radiusPx = clamp(ICON_BASE * Math.pow(scale, SCALE_EXP), ICON_MIN, ICON_MAX);
-  const fontPx = clamp(FONT_BASE * Math.pow(scale, SCALE_EXP), FONT_MIN, FONT_MAX);
+  const fontPx = overlays.scaleLabels ? clamp(FONT_BASE * Math.pow(scale, SCALE_EXP), FONT_MIN, FONT_MAX) : FONT_BASE;
 
   ctx.textBaseline = "middle";
   ctx.font = `${fontPx}px 'JetBrains Mono', ui-monospace, monospace`;
   ctx.fillStyle = "#e2e8f0";
 
-  let earthPosition: { world: Vec2; screen: Vec2 } | null = null;
+  const earthPlacement = placements.find((placement) => placement.body === "Earth");
+  const moonPlacement = placements.find((placement) => placement.body === "Moon");
 
-  PLANETS.forEach((planet) => {
-    const pos = keplerPosition(planet, time.getTime());
-    const screen = worldToScreen(pos);
-    drawPlanetGlyph(ctx, screen, radiusPx, planet);
-    ctx.fillStyle = "#e2e8f0";
-    ctx.fillText(planet.name, screen.x + radiusPx + 6, screen.y);
+  placements.forEach((placement) => {
+    const { body } = placement;
+    if (!overlays.showMoon && body === "Moon") return;
+    if (overlays.viewMode === "heliocentric" && (body === "Sun" || body === "Moon")) return;
 
-    if (planet.name === "Earth") {
-      earthPosition = { world: pos, screen };
+    const center = worldToScreen(placement.world);
+    if (overlays.viewMode === "geocentric" && body === "Sun") {
+      drawSunMarker(ctx, center, scale);
+    } else {
+      const planetDef = body === "Moon" ? MOON : PLANETS.find((planet) => planet.name === body);
+      if (!planetDef) return;
+      drawPlanetGlyph(ctx, center, radiusPx, planetDef);
     }
+    ctx.fillStyle = "#e2e8f0";
+    ctx.fillText(body, center.x + radiusPx + 6, center.y);
   });
 
-  if (earthPosition) {
-    drawMoonSystem(ctx, earthPosition, time, worldToScreen, radiusPx);
+  if (overlays.viewMode === "heliocentric" && overlays.showMoon && earthPlacement && moonPlacement) {
+    drawHeliocentricMoonSystem(ctx, earthPlacement, moonPlacement, worldToScreen, radiusPx);
   }
 }
 
@@ -679,24 +835,22 @@ function drawPlanetGlyph(ctx: CanvasRenderingContext2D, center: Vec2, radius: nu
   }
 }
 
-function drawMoonSystem(
+function drawHeliocentricMoonSystem(
   ctx: CanvasRenderingContext2D,
-  earthPosition: { world: Vec2; screen: Vec2 },
-  time: Date,
+  earthPlacement: Placement,
+  moonPlacement: Placement,
   worldToScreen: (point: Vec2) => Vec2,
   planetRadius: number
 ) {
-  const earthScreen = earthPosition.screen;
-  const moonRelative = keplerPosition(MOON, time.getTime());
-  const moonWorld = { x: earthPosition.world.x + moonRelative.x, y: earthPosition.world.y + moonRelative.y };
-  const moonRawScreen = worldToScreen(moonWorld);
-  const dx = moonRawScreen.x - earthScreen.x;
-  const dy = moonRawScreen.y - earthScreen.y;
-  const rWorldPx = Math.hypot(dx, dy);
-  const theta = Math.atan2(moonWorld.y - earthPosition.world.y, moonWorld.x - earthPosition.world.x);
-  const rTarget = clamp(rWorldPx, MOON_VIS_MIN_PX, MOON_VIS_MAX_PX);
-  const weight = smoothClampWeight(rWorldPx, MOON_VIS_MIN_PX, MOON_VIS_MAX_PX, LERP_SOFTEN_PX);
-  const rVisual = lerp(rWorldPx, rTarget, weight);
+  const earthScreen = worldToScreen(earthPlacement.world);
+  const moonScreenRaw = worldToScreen(moonPlacement.world);
+  const dx = moonScreenRaw.x - earthScreen.x;
+  const dy = moonScreenRaw.y - earthScreen.y;
+  const screenDistance = Math.hypot(dx, dy);
+  const theta = Math.atan2(moonPlacement.world.y - earthPlacement.world.y, moonPlacement.world.x - earthPlacement.world.x);
+  const rTarget = clamp(screenDistance, MOON_VIS_MIN_PX, MOON_VIS_MAX_PX);
+  const weight = smoothClampWeight(screenDistance, MOON_VIS_MIN_PX, MOON_VIS_MAX_PX, LERP_SOFTEN_PX);
+  const rVisual = lerp(screenDistance, rTarget, weight);
   const moonScreen = {
     x: earthScreen.x + rVisual * Math.cos(theta),
     y: earthScreen.y + rVisual * Math.sin(theta),
